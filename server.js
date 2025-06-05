@@ -767,25 +767,7 @@ app.post('/api/trade-local', async (req, res) => {
   const start = Date.now();
   try {
     timing.start = start;
-    console.log(`Received /api/trade-local request for action: ${req.body.action}`, {
-      action: req.body.action,
-      publicKey: req.body.publicKey ? `${req.body.publicKey.slice(0, 4)}...${req.body.publicKey.slice(-4)}` : undefined,
-      mint: req.body.mint ? `${req.body.mint.slice(0, 4)}...${req.body.mint.slice(-4)}` : undefined,
-      amount: req.body.amount,
-      denominatedInSol: req.body.denominatedInSol,
-      slippage: req.body.slippage,
-      priorityFee: req.body.priorityFee,
-      computeUnits: req.body.computeUnits,
-      pool: req.body.pool,
-      skipInitialBuy: req.body.skipInitialBuy,
-      tokenMetadata: req.body.tokenMetadata ? {
-        name: req.body.tokenMetadata.name,
-        symbol: req.body.tokenMetadata.symbol,
-        description_preview: req.body.tokenMetadata.description ? req.body.tokenMetadata.description.substring(0, 50) + "..." : "",
-        image_preview: req.body.tokenMetadata.image ? req.body.tokenMetadata.image.substring(0, 50) + "..." : "",
-      } : undefined
-    });
-
+    console.log('Received /api/trade-local request for action:', req.body.action, req.body);
     // Validate required fields
     if (!req.body.publicKey) {
       throw new Error('Public key is required');
@@ -853,6 +835,7 @@ app.post('/api/trade-local', async (req, res) => {
     }
 
     const pumpStart = Date.now();
+    console.log('Sending request to Pump Portal:', requestBodyForPumpPortal);
     const pumpPortalResponse = await axios.post('https://pumpportal.fun/api/trade-local', requestBodyForPumpPortal, {
       timeout: 60000,
       headers: {
@@ -863,6 +846,7 @@ app.post('/api/trade-local', async (req, res) => {
       responseType: 'arraybuffer'
     });
     timing.pumpPortal = Date.now() - pumpStart;
+    console.log('Received response from Pump Portal');
 
     const responseDataBuffer = Buffer.from(pumpPortalResponse.data);
     
@@ -888,6 +872,7 @@ app.post('/api/trade-local', async (req, res) => {
         const sendStart = Date.now();
         const connection = await getConnection('swap');
         const tx = VersionedTransaction.deserialize(new Uint8Array(responseDataBuffer));
+        console.log('Deserialized transaction');
         if (!req.body.secretKey) {
           throw new Error('User wallet secretKey is required in the request body');
         }
@@ -899,6 +884,7 @@ app.post('/api/trade-local', async (req, res) => {
         const { blockhash } = await connection.getLatestBlockhash('finalized');
         tx.message.recentBlockhash = blockhash;
         tx.sign([userKeypair]);
+        console.log('Signed transaction, sending...');
         // Send the transaction (do not wait for confirmation)
         signature = await connection.sendTransaction(tx, {
           maxRetries: 3,
@@ -906,9 +892,25 @@ app.post('/api/trade-local', async (req, res) => {
           skipPreflight: false
         });
         sendTiming = Date.now() - sendStart;
+        console.log('Transaction sent, signature:', signature);
+        // Wait for 'processed' status
+        let processed = false;
+        for (let i = 0; i < 10; i++) { // up to 10 seconds
+          const status = await connection.getSignatureStatus(signature);
+          if (status && status.value && status.value.confirmationStatus === 'processed') {
+            processed = true;
+            break;
+          }
+          await new Promise(res => setTimeout(res, 1000));
+        }
+        if (!processed) {
+          throw new Error('Transaction not propagated to the network (not processed after 10s)');
+        }
+        console.log('Transaction is processed on the network:', signature);
         break; // Success
       } catch (err) {
         lastError = err;
+        console.error('Error sending transaction:', err);
         if (err.message && err.message.includes('block height exceeded')) {
           sendAttempt++;
           continue; // Retry with a new blockhash
@@ -921,7 +923,7 @@ app.post('/api/trade-local', async (req, res) => {
     if (!signature) {
       throw lastError || new Error('Failed to send transaction');
     }
-    // Return signature immediately, with timing info for debugging
+    // Return signature only after 'processed', with timing info for debugging
     res.json({ status: 'pending', signature, timing });
   } catch (error) {
     console.error('Trade error in /api/trade-local:', error.message);
