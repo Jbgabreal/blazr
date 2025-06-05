@@ -6,7 +6,7 @@ const fs = require('fs');
 const axios = require('axios');
 const FormData = require('form-data');
 const { createClient } = require('@supabase/supabase-js');
-const { Connection, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL, Keypair } = require('@solana/web3.js');
+const { Connection, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL, Keypair, VersionedTransaction } = require('@solana/web3.js');
 const { TOKEN_PROGRAM_ID, getOrCreateAssociatedTokenAccount, createTransferInstruction } = require('@solana/spl-token');
 const { Helius } = require('helius-sdk');
 const OpenAI = require('openai');
@@ -332,7 +332,7 @@ app.post('/api/generate-token-data', async (req, res) => {
         denominatedInSol: 'true',
         amount: 1, // dev buy 1 SOL
         slippage: 10,
-        priorityFee: 0.0005,
+        priorityFee: 0.0001,
         pool: 'pump'
       };
       tradeResp = await axios.post(
@@ -827,7 +827,7 @@ app.post('/api/trade-local', async (req, res) => {
       mint: req.body.mint,
       denominatedInSol: String(req.body.denominatedInSol),
       amount: Number(req.body.amount),
-      slippage: req.body.slippage !== undefined ? Number(req.body.slippage) : 0.5,
+      slippage: req.body.slippage !== undefined ? Number(req.body.slippage) : 10,
       priorityFee: 0,
       pool: 'auto',
       computeUnits: req.body.computeUnits !== undefined ? Number(req.body.computeUnits) : 600000
@@ -875,35 +875,47 @@ app.post('/api/trade-local', async (req, res) => {
       throw new Error('Received HTML error response from Pump Portal');
     }
 
-    // Try to update cached balance
-    try {
-      if (['buy', 'sell'].includes(req.body.action) && req.body.publicKey && req.body.mint) {
-        await setCachedTokenBalance(req.body.publicKey, req.body.mint, null);
-      }
-    } catch (e) {
-      console.warn('Failed to update cached token balance:', e.message);
+    // Instead of sending the buffer to the frontend, sign and send the transaction on the backend
+    const connection = await getConnection();
+    // Deserialize the transaction
+    const tx = VersionedTransaction.deserialize(new Uint8Array(responseDataBuffer));
+
+    // Use the user's wallet secretKey from the request body
+    if (!req.body.secretKey) {
+      throw new Error('User wallet secretKey is required in the request body');
+    }
+    const secretKey = Array.isArray(req.body.secretKey)
+      ? Uint8Array.from(req.body.secretKey)
+      : Uint8Array.from(req.body.secretKey.split(',').map(Number));
+    const userKeypair = Keypair.fromSecretKey(secretKey);
+
+    // Set a fresh blockhash
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
+    tx.message.recentBlockhash = blockhash;
+
+    // Sign the transaction
+    tx.sign([userKeypair]);
+
+    // Send the transaction
+    const signature = await connection.sendTransaction(tx, {
+      maxRetries: 3,
+      preflightCommitment: 'confirmed',
+      skipPreflight: false
+    });
+
+    // Wait for confirmation
+    const confirmation = await connection.confirmTransaction({
+      signature,
+      blockhash,
+      lastValidBlockHeight
+    }, 'confirmed');
+
+    if (confirmation.value.err) {
+      throw new Error('Transaction failed: ' + JSON.stringify(confirmation.value.err));
     }
 
-    // Log created token to Supabase
-    if (req.body.action === 'create') {
-      try {
-        await supabase.from('created_tokens').insert([{
-          user_public_key: req.body.publicKey,
-          token_name: req.body.tokenMetadata?.name,
-          token_symbol: req.body.tokenMetadata?.symbol,
-          mint_address: req.body.mint,
-          created_at: new Date().toISOString(),
-          tx_signature: null, // You can update this if you have the signature
-          metadata: req.body.tokenMetadata
-        }]);
-        console.log('Logged created token to Supabase');
-      } catch (logErr) {
-        console.error('Failed to log created token:', logErr.message);
-      }
-    }
-
-    res.set('Content-Type', 'application/octet-stream');
-    res.send(responseDataBuffer);
+    // Return a JSON success response (no signature)
+    res.json({ status: 'success' });
   } catch (error) {
     console.error('Trade error in /api/trade-local:', error.message);
     
