@@ -886,7 +886,7 @@ app.post('/api/trade-local', async (req, res) => {
     while (sendAttempt < 2) {
       try {
         const sendStart = Date.now();
-        const connection = await getConnection();
+        const connection = await getConnection('swap');
         const tx = VersionedTransaction.deserialize(new Uint8Array(responseDataBuffer));
         if (!req.body.secretKey) {
           throw new Error('User wallet secretKey is required in the request body');
@@ -966,9 +966,18 @@ app.get('/', (req, res) => {
 });
 
 // --- Helper Functions ---
-async function getConnection() {
-  // Use Doppler-injected or environment variable for the RPC URL, fallback to a public endpoint
-  const rpcUrl = process.env.SOLANA_RPC_URL || process.env.QUICKNODE_RPC_URL || 'https://api.mainnet-beta.solana.com';
+async function getConnection(type = 'default') {
+  let rpcUrl;
+  if (type === 'swap') {
+    rpcUrl = process.env.SWAP_SOLANA_RPC_URL
+      || process.env.SOLANA_RPC_URL
+      || process.env.QUICKNODE_RPC_URL
+      || 'https://api.mainnet-beta.solana.com';
+  } else {
+    rpcUrl = process.env.SOLANA_RPC_URL
+      || process.env.QUICKNODE_RPC_URL
+      || 'https://api.mainnet-beta.solana.com';
+  }
   return new Connection(rpcUrl, 'confirmed');
 }
 
