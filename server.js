@@ -763,7 +763,10 @@ app.post('/api/rpc/token-accounts', async (req, res) => {
 
 // --- Trade Local Endpoint ---
 app.post('/api/trade-local', async (req, res) => {
+  const timing = {};
+  const start = Date.now();
   try {
+    timing.start = start;
     console.log(`Received /api/trade-local request for action: ${req.body.action}`, {
       action: req.body.action,
       publicKey: req.body.publicKey ? `${req.body.publicKey.slice(0, 4)}...${req.body.publicKey.slice(-4)}` : undefined,
@@ -849,14 +852,7 @@ app.post('/api/trade-local', async (req, res) => {
       };
     }
 
-    console.log('Sending request to Pump Portal:', {
-      action: requestBodyForPumpPortal.action,
-      publicKey: `${requestBodyForPumpPortal.publicKey.slice(0, 4)}...`,
-      mint: `${requestBodyForPumpPortal.mint.slice(0, 4)}...`,
-      amount: requestBodyForPumpPortal.amount,
-      computeUnits: requestBodyForPumpPortal.computeUnits
-    });
-
+    const pumpStart = Date.now();
     const pumpPortalResponse = await axios.post('https://pumpportal.fun/api/trade-local', requestBodyForPumpPortal, {
       timeout: 60000,
       headers: {
@@ -866,6 +862,7 @@ app.post('/api/trade-local', async (req, res) => {
       },
       responseType: 'arraybuffer'
     });
+    timing.pumpPortal = Date.now() - pumpStart;
 
     const responseDataBuffer = Buffer.from(pumpPortalResponse.data);
     
@@ -882,50 +879,52 @@ app.post('/api/trade-local', async (req, res) => {
       throw new Error('Received HTML error response from Pump Portal');
     }
 
-    // Instead of sending the buffer to the frontend, sign and send the transaction on the backend
-    const connection = await getConnection();
-    // Deserialize the transaction
-    const tx = VersionedTransaction.deserialize(new Uint8Array(responseDataBuffer));
-
-    // Use the user's wallet secretKey from the request body
-    if (!req.body.secretKey) {
-      throw new Error('User wallet secretKey is required in the request body');
+    let sendAttempt = 0;
+    let signature = null;
+    let lastError = null;
+    let sendTiming = 0;
+    while (sendAttempt < 2) {
+      try {
+        const sendStart = Date.now();
+        const connection = await getConnection();
+        const tx = VersionedTransaction.deserialize(new Uint8Array(responseDataBuffer));
+        if (!req.body.secretKey) {
+          throw new Error('User wallet secretKey is required in the request body');
+        }
+        const secretKey = Array.isArray(req.body.secretKey)
+          ? Uint8Array.from(req.body.secretKey)
+          : Uint8Array.from(req.body.secretKey.split(',').map(Number));
+        const userKeypair = Keypair.fromSecretKey(secretKey);
+        // Set a fresh blockhash
+        const { blockhash } = await connection.getLatestBlockhash('finalized');
+        tx.message.recentBlockhash = blockhash;
+        tx.sign([userKeypair]);
+        // Send the transaction (do not wait for confirmation)
+        signature = await connection.sendTransaction(tx, {
+          maxRetries: 3,
+          preflightCommitment: 'processed',
+          skipPreflight: false
+        });
+        sendTiming = Date.now() - sendStart;
+        break; // Success
+      } catch (err) {
+        lastError = err;
+        if (err.message && err.message.includes('block height exceeded')) {
+          sendAttempt++;
+          continue; // Retry with a new blockhash
+        }
+        break; // Other errors, do not retry
+      }
     }
-    const secretKey = Array.isArray(req.body.secretKey)
-      ? Uint8Array.from(req.body.secretKey)
-      : Uint8Array.from(req.body.secretKey.split(',').map(Number));
-    const userKeypair = Keypair.fromSecretKey(secretKey);
-
-    // Set a fresh blockhash
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
-    tx.message.recentBlockhash = blockhash;
-
-    // Sign the transaction
-    tx.sign([userKeypair]);
-
-    // Send the transaction
-    const signature = await connection.sendTransaction(tx, {
-      maxRetries: 3,
-      preflightCommitment: 'confirmed',
-      skipPreflight: false
-    });
-
-    // Wait for confirmation
-    const confirmation = await connection.confirmTransaction({
-      signature,
-      blockhash,
-      lastValidBlockHeight
-    }, 'confirmed');
-
-    if (confirmation.value.err) {
-      throw new Error('Transaction failed: ' + JSON.stringify(confirmation.value.err));
+    timing.sendTransaction = sendTiming;
+    timing.total = Date.now() - start;
+    if (!signature) {
+      throw lastError || new Error('Failed to send transaction');
     }
-
-    // Return a JSON success response (no signature)
-    res.json({ status: 'success' });
+    // Return signature immediately, with timing info for debugging
+    res.json({ status: 'pending', signature, timing });
   } catch (error) {
     console.error('Trade error in /api/trade-local:', error.message);
-    
     let status = 500;
     let errorResponse = {
       error: 'Failed to process request',
@@ -937,15 +936,12 @@ app.post('/api/trade-local', async (req, res) => {
         amount: req.body.amount
       }
     };
-
     if (error.response) {
       status = error.response.status || status;
-      // Log the full error response from Pump Portal
       console.error('Pump Portal API error response:', error.response.data);
       errorResponse.error = `Pump Portal API Error: ${error.response.data?.error || error.response.data?.message || 'Unknown error'}`;
       errorResponse.details = error.response.data;
     }
-
     res.status(status).json(errorResponse);
   }
 });
