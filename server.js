@@ -14,6 +14,8 @@ const { encode } = require('bs58');
 const bip39 = require('bip39');
 const { derivePath } = require('ed25519-hd-key');
 const child_process = require('child_process');
+const bs58 = require('bs58');
+const { Buffer } = require('buffer');
 
 // Debug logging for environment variables
 console.log('SUPABASE_URL:', process.env.SUPABASE_URL);
@@ -863,60 +865,76 @@ app.post('/api/trade-local', async (req, res) => {
       throw new Error('Received HTML error response from Pump Portal');
     }
 
+    // Log the full transaction (base64) for debugging
+    const txBase64 = responseDataBuffer.toString('base64');
+    console.log('Serialized transaction (base64):', txBase64);
+
     let sendAttempt = 0;
     let signature = null;
     let lastError = null;
     let sendTiming = 0;
+    let usedBackupRpc = false;
+    const rpcUrls = [process.env.SWAP_SOLANA_RPC_URL, process.env.SWAP2_SOLANA_RPC_URL].filter(Boolean);
     while (sendAttempt < 2) {
-      try {
-        const sendStart = Date.now();
-        const connection = await getConnection('swap');
-        const tx = VersionedTransaction.deserialize(new Uint8Array(responseDataBuffer));
-        console.log('Deserialized transaction');
-        if (!req.body.secretKey) {
-          throw new Error('User wallet secretKey is required in the request body');
-        }
-        const secretKey = Array.isArray(req.body.secretKey)
-          ? Uint8Array.from(req.body.secretKey)
-          : Uint8Array.from(req.body.secretKey.split(',').map(Number));
-        const userKeypair = Keypair.fromSecretKey(secretKey);
-        // Set a fresh blockhash
-        const { blockhash } = await connection.getLatestBlockhash('finalized');
-        tx.message.recentBlockhash = blockhash;
-        tx.sign([userKeypair]);
-        console.log('Signed transaction, sending...');
-        // Send the transaction (do not wait for confirmation)
-        signature = await connection.sendTransaction(tx, {
-          maxRetries: 3,
-          preflightCommitment: 'processed',
-          skipPreflight: false
-        });
-        sendTiming = Date.now() - sendStart;
-        console.log('Transaction sent, signature:', signature);
-        // Wait for 'processed' status
-        let processed = false;
-        for (let i = 0; i < 10; i++) { // up to 10 seconds
-          const status = await connection.getSignatureStatus(signature);
-          if (status && status.value && status.value.confirmationStatus === 'processed') {
-            processed = true;
-            break;
+      for (let rpcIdx = 0; rpcIdx < rpcUrls.length; rpcIdx++) {
+        try {
+          const sendStart = Date.now();
+          const rpcUrl = rpcUrls[rpcIdx];
+          const connection = new Connection(rpcUrl, 'confirmed');
+          const tx = VersionedTransaction.deserialize(new Uint8Array(responseDataBuffer));
+          console.log(`Deserialized transaction (using RPC ${rpcIdx + 1}: ${rpcUrl})`);
+          if (!req.body.secretKey) {
+            throw new Error('User wallet secretKey is required in the request body');
           }
-          await new Promise(res => setTimeout(res, 1000));
+          const secretKey = Array.isArray(req.body.secretKey)
+            ? Uint8Array.from(req.body.secretKey)
+            : Uint8Array.from(req.body.secretKey.split(',').map(Number));
+          const userKeypair = Keypair.fromSecretKey(secretKey);
+          // Always ensure a fresh blockhash before each send attempt
+          const { blockhash } = await connection.getLatestBlockhash('finalized');
+          tx.message.recentBlockhash = blockhash;
+          tx.sign([userKeypair]);
+          console.log('Signed transaction, sending...');
+          // Send the transaction (do not wait for confirmation)
+          signature = await connection.sendTransaction(tx, {
+            maxRetries: 3,
+            preflightCommitment: 'processed',
+            skipPreflight: false
+          });
+          sendTiming = Date.now() - sendStart;
+          console.log('Transaction sent, signature:', signature);
+          // Wait for 'processed' status
+          let processed = false;
+          for (let i = 0; i < 10; i++) { // up to 10 seconds
+            const status = await connection.getSignatureStatus(signature);
+            if (status && status.value && status.value.confirmationStatus === 'processed') {
+              processed = true;
+              break;
+            }
+            await new Promise(res => setTimeout(res, 1000));
+          }
+          if (!processed) {
+            throw new Error('Transaction not propagated to the network (not processed after 10s)');
+          }
+          console.log('Transaction is processed on the network:', signature);
+          usedBackupRpc = rpcIdx === 1;
+          break; // Success
+        } catch (err) {
+          lastError = err;
+          console.error(`Error sending transaction (RPC ${rpcIdx + 1}):`, err);
+          if (err.message && err.message.includes('block height exceeded')) {
+            sendAttempt++;
+            continue; // Retry with a new blockhash
+          }
+          // If not last RPC, try next one
+          if (rpcIdx < rpcUrls.length - 1) {
+            continue;
+          }
+          break; // Other errors, do not retry
         }
-        if (!processed) {
-          throw new Error('Transaction not propagated to the network (not processed after 10s)');
-        }
-        console.log('Transaction is processed on the network:', signature);
-        break; // Success
-      } catch (err) {
-        lastError = err;
-        console.error('Error sending transaction:', err);
-        if (err.message && err.message.includes('block height exceeded')) {
-          sendAttempt++;
-          continue; // Retry with a new blockhash
-        }
-        break; // Other errors, do not retry
       }
+      if (signature) break;
+      sendAttempt++;
     }
     timing.sendTransaction = sendTiming;
     timing.total = Date.now() - start;
@@ -924,9 +942,9 @@ app.post('/api/trade-local', async (req, res) => {
       throw lastError || new Error('Failed to send transaction');
     }
     // Return signature only after 'processed', with timing info for debugging
-    res.json({ status: 'pending', signature, timing });
+    res.json({ status: 'pending', signature, timing, usedBackupRpc });
   } catch (error) {
-    console.error('Trade error in /api/trade-local:', error.message);
+    console.error('Trade error in /api/trade-local:', error.message, error);
     let status = 500;
     let errorResponse = {
       error: 'Failed to process request',
