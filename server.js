@@ -964,7 +964,9 @@ app.get('/', (req, res) => {
 
 // --- Helper Functions ---
 async function getConnection() {
-  // Implementation of getConnection function
+  // Use Doppler-injected or environment variable for the RPC URL, fallback to a public endpoint
+  const rpcUrl = process.env.SOLANA_RPC_URL || process.env.QUICKNODE_RPC_URL || 'https://api.mainnet-beta.solana.com';
+  return new Connection(rpcUrl, 'confirmed');
 }
 
 const MORALIS_API_KEY = process.env.MORALIS_API_KEY;
