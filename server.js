@@ -851,38 +851,28 @@ app.post('/api/trade-local', async (req, res) => {
     console.log('Received response from Pump Portal');
 
     const responseDataBuffer = Buffer.from(pumpPortalResponse.data);
-    
-    // Check for JSON error response
-    if (pumpPortalResponse.headers['content-type']?.includes('application/json')) {
-      const jsonError = JSON.parse(responseDataBuffer.toString());
-      console.error('Pump Portal returned JSON error:', jsonError);
-      throw new Error(`Pump Portal Error: ${jsonError.error || jsonError.message || 'Unknown JSON error'}`);
-    }
-
-    // Check for HTML error response
-    if (responseDataBuffer.toString('utf8', 0, 100).trim().toLowerCase().startsWith('<!doctype html')) {
-      console.error('Pump Portal returned HTML error page');
-      throw new Error('Received HTML error response from Pump Portal');
-    }
-
-    // Log the full transaction (base64) for debugging
     const txBase64 = responseDataBuffer.toString('base64');
     console.log('Serialized transaction (base64):', txBase64);
 
-    let sendAttempt = 0;
+    // Advanced retry logic
+    const rpcUrls = [process.env.SWAP_SOLANA_RPC_URL, process.env.SWAP2_SOLANA_RPC_URL].filter(Boolean);
+    const maxAttempts = 2;
+    const maxPolls = 15;
+    const basePollInterval = 1000; // ms
+
     let signature = null;
     let lastError = null;
     let sendTiming = 0;
     let usedBackupRpc = false;
-    const rpcUrls = [process.env.SWAP_SOLANA_RPC_URL, process.env.SWAP2_SOLANA_RPC_URL].filter(Boolean);
-    while (sendAttempt < 2) {
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       for (let rpcIdx = 0; rpcIdx < rpcUrls.length; rpcIdx++) {
         try {
           const sendStart = Date.now();
           const rpcUrl = rpcUrls[rpcIdx];
           const connection = new Connection(rpcUrl, 'confirmed');
           const tx = VersionedTransaction.deserialize(new Uint8Array(responseDataBuffer));
-          console.log(`Deserialized transaction (using RPC ${rpcIdx + 1}: ${rpcUrl})`);
+          console.log(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Deserialized transaction (using RPC: ${rpcUrl})`);
           if (!req.body.secretKey) {
             throw new Error('User wallet secretKey is required in the request body');
           }
@@ -890,58 +880,59 @@ app.post('/api/trade-local', async (req, res) => {
             ? Uint8Array.from(req.body.secretKey)
             : Uint8Array.from(req.body.secretKey.split(',').map(Number));
           const userKeypair = Keypair.fromSecretKey(secretKey);
+
           // Always ensure a fresh blockhash before each send attempt
           const { blockhash } = await connection.getLatestBlockhash('finalized');
           tx.message.recentBlockhash = blockhash;
           tx.sign([userKeypair]);
-          console.log('Signed transaction, sending...');
-          // Send the transaction (do not wait for confirmation)
+          console.log(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Signed transaction, sending...`);
           signature = await connection.sendTransaction(tx, {
             maxRetries: 3,
             preflightCommitment: 'processed',
             skipPreflight: false
           });
           sendTiming = Date.now() - sendStart;
-          console.log('Transaction sent, signature:', signature);
-          // Wait for 'processed' status
+          console.log(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Transaction sent, signature:`, signature);
+
+          // Poll for 'processed' status with exponential backoff
           let processed = false;
-          for (let i = 0; i < 10; i++) { // up to 10 seconds
+          for (let i = 0; i < maxPolls; i++) {
             const status = await connection.getSignatureStatus(signature);
             if (status && status.value && status.value.confirmationStatus === 'processed') {
               processed = true;
               break;
             }
-            await new Promise(res => setTimeout(res, 1000));
+            const wait = basePollInterval * Math.pow(1.5, attempt); // Exponential backoff per attempt
+            await new Promise(res => setTimeout(res, wait));
           }
           if (!processed) {
-            throw new Error('Transaction not propagated to the network (not processed after 10s)');
+            throw new Error(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Transaction not propagated to the network (not processed after ${maxPolls * basePollInterval / 1000}s)`);
           }
-          console.log('Transaction is processed on the network:', signature);
+          console.log(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Transaction is processed on the network:`, signature);
           usedBackupRpc = rpcIdx === 1;
           break; // Success
         } catch (err) {
           lastError = err;
-          console.error(`Error sending transaction (RPC ${rpcIdx + 1}):`, err);
-          if (err.message && err.message.includes('block height exceeded')) {
-            sendAttempt++;
-            continue; // Retry with a new blockhash
-          }
+          console.error(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Error sending transaction:`, err);
           // If not last RPC, try next one
           if (rpcIdx < rpcUrls.length - 1) {
+            continue;
+          }
+          // If blockhash error, try next attempt (new blockhash)
+          if (err.message && err.message.includes('block height exceeded')) {
             continue;
           }
           break; // Other errors, do not retry
         }
       }
       if (signature) break;
-      sendAttempt++;
     }
+
     timing.sendTransaction = sendTiming;
     timing.total = Date.now() - start;
     if (!signature) {
       throw lastError || new Error('Failed to send transaction');
     }
-    // Return signature only after 'processed', with timing info for debugging
     res.json({ status: 'pending', signature, timing, usedBackupRpc });
   } catch (error) {
     console.error('Trade error in /api/trade-local:', error.message, error);
