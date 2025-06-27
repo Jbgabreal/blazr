@@ -891,16 +891,28 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
           if (!secretKey || secretKey.length === 0) {
             throw new Error('User wallet secretKey is required in the request body');
           }
-          if (!mintSecretKey || mintSecretKey.length === 0) {
-            throw new Error('Mint secretKey is required in the request body');
-          }
+          
           const userKeypair = Keypair.fromSecretKey(Uint8Array.from(secretKey));
-          const mintKeypair = Keypair.fromSecretKey(Uint8Array.from(mintSecretKey));
-
-          // Always ensure a fresh blockhash before each send attempt
-          const { blockhash } = await connection.getLatestBlockhash('finalized');
-          tx.message.recentBlockhash = blockhash;
-          tx.sign([mintKeypair, userKeypair]);
+          
+          // For token creation, mintSecretKey is required
+          if (req.body.action === 'create') {
+            if (!mintSecretKey || mintSecretKey.length === 0) {
+              throw new Error('Mint secretKey is required for token creation');
+            }
+            const mintKeypair = Keypair.fromSecretKey(Uint8Array.from(mintSecretKey));
+            
+            // Always ensure a fresh blockhash before each send attempt
+            const { blockhash } = await connection.getLatestBlockhash('finalized');
+            tx.message.recentBlockhash = blockhash;
+            tx.sign([mintKeypair, userKeypair]);
+          } else {
+            // For swaps (buy/sell), only user keypair is needed
+            // Always ensure a fresh blockhash before each send attempt
+            const { blockhash } = await connection.getLatestBlockhash('finalized');
+            tx.message.recentBlockhash = blockhash;
+            tx.sign([userKeypair]);
+          }
+          
           console.log(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Signed transaction, sending...`);
           signature = await connection.sendTransaction(tx, {
             maxRetries: 3,
