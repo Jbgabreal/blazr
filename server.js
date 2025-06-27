@@ -30,7 +30,12 @@ const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir);
 }
-const upload = multer({ dest: uploadDir });
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB limit
+  }
+});
 
 // Initialize clients
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
@@ -763,19 +768,18 @@ app.post('/api/rpc/token-accounts', async (req, res) => {
   }
 });
 
-// --- Trade Local Endpoint ---
-app.post('/api/trade-local', async (req, res) => {
-  const timing = {};
+// --- Endpoint for trade-local ---
+app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
   const start = Date.now();
+  const timing = {};
+
   try {
-    timing.start = start;
-    console.log('Received /api/trade-local request for action:', req.body.action, req.body);
     // Validate required fields
     if (!req.body.publicKey) {
       throw new Error('Public key is required');
     }
-    if (!req.body.mint) {
-      throw new Error('Token mint address is required');
+    if (!req.body.action) {
+      throw new Error('Action is required');
     }
     if (req.body.amount === undefined || req.body.amount === null) {
       throw new Error('Amount is required');
@@ -788,33 +792,38 @@ app.post('/api/trade-local', async (req, res) => {
     let metadataUri;
     if (req.body.action === 'create' && req.body.tokenMetadata) {
       try {
+        const tokenMetadata = JSON.parse(req.body.tokenMetadata);
         const formData = new FormData();
-        formData.append('name', req.body.tokenMetadata.name);
-        formData.append('symbol', req.body.tokenMetadata.symbol);
-        formData.append('description', req.body.tokenMetadata.description || '');
-        formData.append('twitter', req.body.tokenMetadata.twitter || '');
+        formData.append('name', tokenMetadata.name);
+        formData.append('symbol', tokenMetadata.symbol);
+        formData.append('description', tokenMetadata.description || '');
+        formData.append('twitter', tokenMetadata.twitter || '');
         formData.append('showName', 'true');
         
-        // Use the original image file from the request
-        if (req.body.tokenMetadata.imageFile) {
-          const imageBuffer = Buffer.from(req.body.tokenMetadata.imageFile.split(',')[1], 'base64');
-          const tmpImagePath = path.join(uploadDir, `tmp_${Date.now()}.png`);
-          fs.writeFileSync(tmpImagePath, imageBuffer);
-          formData.append('file', fs.createReadStream(tmpImagePath), 'image.png');
+        // Use the uploaded image file
+        if (req.file) {
+          formData.append('file', req.file.buffer, { filename: 'token.png', contentType: req.file.mimetype });
           
-          const ipfsResp = await axios.post('https://pump.fun/api/ipfs', formData, { headers: formData.getHeaders() });
-          fs.unlinkSync(tmpImagePath);
+          const ipfsResp = await axios.post('https://pump.fun/api/ipfs', formData, { 
+            headers: formData.getHeaders() 
+          });
           metadataUri = ipfsResp.data.metadataUri;
+          console.log('IPFS upload successful, metadataUri:', metadataUri);
         } else {
           throw new Error('Image file is required for token creation');
         }
       } catch (error) {
         console.error('IPFS upload error:', error);
-        throw new Error('Failed to upload metadata to IPFS');
+        throw new Error('Failed to upload metadata to IPFS: ' + error.message);
       }
     }
 
-    // Build the request as in the old working project
+    // Parse other fields from FormData
+    const secretKey = JSON.parse(req.body.secretKey || '[]');
+    const computeBudget = JSON.parse(req.body.computeBudget || '{}');
+    const instructions = JSON.parse(req.body.instructions || '[]');
+
+    // Build the request for Pump Portal
     let requestBodyForPumpPortal = {
       publicKey: req.body.publicKey,
       action: req.body.action,
@@ -822,16 +831,21 @@ app.post('/api/trade-local', async (req, res) => {
       denominatedInSol: String(req.body.denominatedInSol),
       amount: Number(req.body.amount),
       slippage: req.body.slippage !== undefined ? Number(req.body.slippage) : 10,
-      priorityFee: 0,
-      pool: 'auto',
-      computeUnits: req.body.computeUnits !== undefined ? Number(req.body.computeUnits) : 600000
+      priorityFee: Number(req.body.priorityFee || 0),
+      pool: req.body.pool || 'auto',
+      computeUnits: req.body.computeUnits !== undefined ? Number(req.body.computeUnits) : 600000,
+      maxComputeUnits: req.body.maxComputeUnits !== undefined ? Number(req.body.maxComputeUnits) : 600000,
+      skipPreflight: req.body.skipPreflight === 'true',
+      computeBudget: computeBudget,
+      instructions: instructions,
+      skipInitialBuy: req.body.skipInitialBuy === 'true'
     };
 
     // Add metadataUri for token creation
     if (req.body.action === 'create' && metadataUri) {
       requestBodyForPumpPortal.tokenMetadata = {
-        name: req.body.tokenMetadata.name,
-        symbol: req.body.tokenMetadata.symbol,
+        name: JSON.parse(req.body.tokenMetadata).name,
+        symbol: JSON.parse(req.body.tokenMetadata).symbol,
         uri: metadataUri
       };
     }
@@ -873,13 +887,10 @@ app.post('/api/trade-local', async (req, res) => {
           const connection = new Connection(rpcUrl, 'confirmed');
           const tx = VersionedTransaction.deserialize(new Uint8Array(responseDataBuffer));
           console.log(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Deserialized transaction (using RPC: ${rpcUrl})`);
-          if (!req.body.secretKey) {
+          if (!secretKey || secretKey.length === 0) {
             throw new Error('User wallet secretKey is required in the request body');
           }
-          const secretKey = Array.isArray(req.body.secretKey)
-            ? Uint8Array.from(req.body.secretKey)
-            : Uint8Array.from(req.body.secretKey.split(',').map(Number));
-          const userKeypair = Keypair.fromSecretKey(secretKey);
+          const userKeypair = Keypair.fromSecretKey(Uint8Array.from(secretKey));
 
           // Always ensure a fresh blockhash before each send attempt
           const { blockhash } = await connection.getLatestBlockhash('finalized');
