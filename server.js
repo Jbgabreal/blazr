@@ -1037,7 +1037,7 @@ app.get('/api/created-tokens', async (req, res) => {
     const { publicKey } = req.query;
     let query = supabase.from('created_tokens').select('*').order('launched_at', { ascending: false });
     if (publicKey) {
-      query = query.eq('creator', publicKey);
+      query = query.eq('user_public_key', publicKey);
     }
     const { data, error } = await query;
     if (error) throw error;
