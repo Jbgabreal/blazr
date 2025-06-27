@@ -820,6 +820,7 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
 
     // Parse other fields from FormData
     const secretKey = JSON.parse(req.body.secretKey || '[]');
+    const mintSecretKey = JSON.parse(req.body.mintSecretKey || '[]');
     const computeBudget = JSON.parse(req.body.computeBudget || '{}');
     const instructions = JSON.parse(req.body.instructions || '[]');
 
@@ -890,12 +891,16 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
           if (!secretKey || secretKey.length === 0) {
             throw new Error('User wallet secretKey is required in the request body');
           }
+          if (!mintSecretKey || mintSecretKey.length === 0) {
+            throw new Error('Mint secretKey is required in the request body');
+          }
           const userKeypair = Keypair.fromSecretKey(Uint8Array.from(secretKey));
+          const mintKeypair = Keypair.fromSecretKey(Uint8Array.from(mintSecretKey));
 
           // Always ensure a fresh blockhash before each send attempt
           const { blockhash } = await connection.getLatestBlockhash('finalized');
           tx.message.recentBlockhash = blockhash;
-          tx.sign([userKeypair]);
+          tx.sign([mintKeypair, userKeypair]);
           console.log(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Signed transaction, sending...`);
           signature = await connection.sendTransaction(tx, {
             maxRetries: 3,
