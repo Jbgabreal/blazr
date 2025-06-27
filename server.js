@@ -987,6 +987,54 @@ app.get('/api/created-tokens', async (req, res) => {
   }
 });
 
+// --- Endpoint to save a launched token ---
+app.post('/api/created-tokens', async (req, res) => {
+  try {
+    const { mint, name, symbol, description, image, publicKey, launchedAt, txSignature } = req.body;
+    if (!mint || !publicKey) {
+      return res.status(400).json({ error: 'mint and publicKey are required' });
+    }
+    // Compose metadata JSON
+    const metadata = {
+      name,
+      symbol,
+      description,
+      image
+    };
+    const { data, error } = await supabase
+      .from('created_tokens')
+      .insert([{
+        mint_address: mint,
+        user_public_key: publicKey,
+        token_name: name,
+        token_symbol: symbol,
+        created_at: launchedAt || new Date().toISOString(),
+        tx_signature: txSignature || null,
+        metadata
+      }]);
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Endpoint to fetch launched tokens for a user ---
+app.get('/api/created-tokens', async (req, res) => {
+  try {
+    const { publicKey } = req.query;
+    let query = supabase.from('created_tokens').select('*').order('launched_at', { ascending: false });
+    if (publicKey) {
+      query = query.eq('creator', publicKey);
+    }
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json({ tokens: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Add root route handler
 app.get('/', (req, res) => {
   res.json({ message: 'Server is running' });
