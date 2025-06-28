@@ -991,7 +991,7 @@ app.get('/api/created-tokens', async (req, res) => {
     const { data, error } = await supabase
       .from('created_tokens')
       .select('*')
-      .order('launched_at', { ascending: false });
+      .order('created_at', { ascending: false });
     if (error) throw error;
     res.json({ tokens: data });
   } catch (err) {
@@ -1010,7 +1010,7 @@ app.get('/api/created-tokens/user', async (req, res) => {
       .from('created_tokens')
       .select('*')
       .eq('user_public_key', publicKey)
-      .order('launched_at', { ascending: false });
+      .order('created_at', { ascending: false });
     if (error) throw error;
     res.json({ tokens: data });
   } catch (err) {
