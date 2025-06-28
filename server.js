@@ -1035,14 +1035,25 @@ app.post('/api/created-tokens', async (req, res) => {
 app.get('/api/created-tokens', async (req, res) => {
   try {
     const { publicKey } = req.query;
+    console.log('[created-tokens] Incoming request with publicKey:', publicKey);
+
     let query = supabase.from('created_tokens').select('*').order('launched_at', { ascending: false });
     if (publicKey) {
+      console.log('[created-tokens] Filtering by user_public_key:', publicKey);
       query = query.eq('user_public_key', publicKey);
+    } else {
+      console.log('[created-tokens] No publicKey provided, returning all tokens!');
     }
+
     const { data, error } = await query;
-    if (error) throw error;
+    if (error) {
+      console.error('[created-tokens] Supabase error:', error);
+      throw error;
+    }
+    console.log(`[created-tokens] Returning ${data.length} tokens`);
     res.json({ tokens: data });
   } catch (err) {
+    console.error('[created-tokens] Handler error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
