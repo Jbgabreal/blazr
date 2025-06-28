@@ -594,21 +594,14 @@ app.post('/api/transactions/send-spl', async (req, res) => {
 app.post('/api/rpc/token-accounts', async (req, res) => {
   try {
     const { owner } = req.body;
-    console.log('Received token-accounts request for owner:', owner);
-    
     if (!owner) {
-      console.log('No owner provided in request');
       return res.status(400).json({ error: 'Owner public key is required' });
     }
-
     // Check wallet cache first
     const cachedTokens = await getCachedWalletTokens(owner);
     if (cachedTokens) {
-      console.log('Serving wallet tokens from cache');
       return res.json({ tokens: cachedTokens });
     }
-
-    console.log('Making RPC call to Helius for token accounts...');
     const tokenAccountsResponse = await axios.post(
       `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`,
       {
@@ -626,11 +619,9 @@ app.post('/api/rpc/token-accounts', async (req, res) => {
         ]
       }
     );
-
     if (!tokenAccountsResponse.data || !tokenAccountsResponse.data.result || !tokenAccountsResponse.data.result.value) {
       throw new Error('Invalid response from Helius token accounts');
     }
-
     // First collect all tokens with positive balances
     const tokensMap = tokenAccountsResponse.data.result.value.reduce((acc, account) => {
       try {
@@ -667,12 +658,8 @@ app.post('/api/rpc/token-accounts', async (req, res) => {
     }
 
     // Fetch prices from Moralis
-    console.log('Fetching Moralis prices for tokens:', mints.length);
     const priceData = await fetchTokenPrices(mints);
-    console.log('Moralis priceData:', JSON.stringify(priceData, null, 2));
-
     // Fetch metadata from Helius
-    console.log('Fetching Helius metadata for tokens:', mints.length);
     const heliusMetaResp = await axios.post(
       `https://api.helius.xyz/v0/tokens/metadata?api-key=${process.env.HELIUS_API_KEY}`,
       { mintAccounts: mints }
@@ -680,8 +667,6 @@ app.post('/api/rpc/token-accounts', async (req, res) => {
     const heliusMetaArr = heliusMetaResp.data;
     const heliusMetaMap = {};
     heliusMetaArr.forEach(meta => { heliusMetaMap[meta.mint] = meta; });
-    console.log('HeliusMetaMap:', JSON.stringify(heliusMetaMap, null, 2));
-
     // Helper to resolve IPFS URLs
     function resolveIpfsUrl(url) {
       if (!url) return '';
@@ -696,8 +681,6 @@ app.post('/api/rpc/token-accounts', async (req, res) => {
     for (const [mint, tokenData] of Object.entries(tokensMap)) {
       const price = priceData[mint] || {};
       const meta = heliusMetaMap[mint] || {};
-      console.log('Mint:', mint, 'Meta:', JSON.stringify(meta, null, 2));
-      // Prefer offChainData.image, fallback to onChainData.data.uri
       let image = meta.offChainData?.image || meta.legacyMetadata?.logoURI || '';
       if (!image && meta.onChainData?.data?.uri) {
         image = meta.onChainData.data.uri;
@@ -755,8 +738,6 @@ app.post('/api/rpc/token-accounts', async (req, res) => {
     };
     const allTokens = [solToken, ...Object.values(tokens)];
 
-    console.log('Sending response with tokens:', allTokens.length);
-    console.log('All tokens response:', JSON.stringify(allTokens, null, 2));
     await setCachedWalletTokens(owner, allTokens);
     res.json({ tokens: allTokens });
   } catch (error) {
