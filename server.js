@@ -1039,18 +1039,29 @@ app.get('/api/created-tokens', async (req, res) => {
 
     let query = supabase.from('created_tokens').select('*').order('launched_at', { ascending: false });
     if (publicKey) {
-      console.log('[created-tokens] Filtering by user_public_key:', publicKey);
+      console.log('[created-tokens] Should filter by user_public_key:', publicKey);
       query = query.eq('user_public_key', publicKey);
     } else {
-      console.log('[created-tokens] No publicKey provided, returning all tokens!');
+      console.log('[created-tokens] No publicKey provided, will return all tokens!');
     }
 
+    // Actually execute the query and log the raw SQL (if possible)
     const { data, error } = await query;
     if (error) {
       console.error('[created-tokens] Supabase error:', error);
       throw error;
     }
-    console.log(`[created-tokens] Returning ${data.length} tokens`);
+
+    // Log the user_public_key of each returned token for debugging
+    if (data && Array.isArray(data)) {
+      console.log(`[created-tokens] Returned ${data.length} tokens. user_public_key values:`);
+      data.forEach((token, idx) => {
+        console.log(`  [${idx}] user_public_key: ${token.user_public_key}, mint_address: ${token.mint_address}`);
+      });
+    } else {
+      console.log('[created-tokens] No data returned.');
+    }
+
     res.json({ tokens: data });
   } catch (err) {
     console.error('[created-tokens] Handler error:', err.message);
