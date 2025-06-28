@@ -985,13 +985,13 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
   }
 });
 
-// --- Endpoint to fetch all created tokens ---
+// --- Endpoint to fetch ALL created tokens (for landing page, public, etc.) ---
 app.get('/api/created-tokens', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('created_tokens')
       .select('*')
-      .order('created_at', { ascending: false });
+      .order('launched_at', { ascending: false });
     if (error) throw error;
     res.json({ tokens: data });
   } catch (err) {
@@ -999,72 +999,21 @@ app.get('/api/created-tokens', async (req, res) => {
   }
 });
 
-// --- Endpoint to save a launched token ---
-app.post('/api/created-tokens', async (req, res) => {
-  try {
-    const { mint, name, symbol, description, image, publicKey, launchedAt, txSignature } = req.body;
-    if (!mint || !publicKey) {
-      return res.status(400).json({ error: 'mint and publicKey are required' });
-    }
-    // Compose metadata JSON
-    const metadata = {
-      name,
-      symbol,
-      description,
-      image
-    };
-    const { data, error } = await supabase
-      .from('created_tokens')
-      .insert([{
-        mint_address: mint,
-        user_public_key: publicKey,
-        token_name: name,
-        token_symbol: symbol,
-        created_at: launchedAt || new Date().toISOString(),
-        tx_signature: txSignature || null,
-        metadata
-      }]);
-    if (error) throw error;
-    res.json({ success: true, data });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// --- Endpoint to fetch launched tokens for a user ---
-app.get('/api/created-tokens', async (req, res) => {
+// --- Endpoint to fetch tokens created BY A USER (for dashboard/portfolio) ---
+app.get('/api/created-tokens/user', async (req, res) => {
   try {
     const { publicKey } = req.query;
-    console.log('[created-tokens] Incoming request with publicKey:', publicKey);
-
-    let query = supabase.from('created_tokens').select('*').order('launched_at', { ascending: false });
-    if (publicKey) {
-      console.log('[created-tokens] Should filter by user_public_key:', publicKey);
-      query = query.eq('user_public_key', publicKey);
-    } else {
-      console.log('[created-tokens] No publicKey provided, will return all tokens!');
+    if (!publicKey) {
+      return res.status(400).json({ error: 'Missing publicKey' });
     }
-
-    // Actually execute the query and log the raw SQL (if possible)
-    const { data, error } = await query;
-    if (error) {
-      console.error('[created-tokens] Supabase error:', error);
-      throw error;
-    }
-
-    // Log the user_public_key of each returned token for debugging
-    if (data && Array.isArray(data)) {
-      console.log(`[created-tokens] Returned ${data.length} tokens. user_public_key values:`);
-      data.forEach((token, idx) => {
-        console.log(`  [${idx}] user_public_key: ${token.user_public_key}, mint_address: ${token.mint_address}`);
-      });
-    } else {
-      console.log('[created-tokens] No data returned.');
-    }
-
+    const { data, error } = await supabase
+      .from('created_tokens')
+      .select('*')
+      .eq('user_public_key', publicKey)
+      .order('launched_at', { ascending: false });
+    if (error) throw error;
     res.json({ tokens: data });
   } catch (err) {
-    console.error('[created-tokens] Handler error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
