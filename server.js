@@ -16,6 +16,7 @@ const { derivePath } = require('ed25519-hd-key');
 const child_process = require('child_process');
 const bs58 = require('bs58');
 const { Buffer } = require('buffer');
+const fetch = require('node-fetch');
 
 // Debug logging for environment variables
 console.log('SUPABASE_URL:', process.env.SUPABASE_URL);
@@ -394,80 +395,151 @@ app.post('/api/generate-token-data', async (req, res) => {
 
 // --- Generate Token Metadata Only Endpoint ---
 app.post('/api/generate-token-metadata', async (req, res) => {
+  console.log('[TokenMeta] Incoming request:', req.body);
   try {
-    const { text, mediaUrls, tweetUrl, authorName, authorAvatar } = req.body;
-    if (!text || !tweetUrl || !authorName) {
-      return res.status(400).json({
-        error: 'Missing required fields',
-        required: ['text', 'tweetUrl', 'authorName']
-      });
+    const { text, mediaUrls, tweetUrl, postUrl, authorName, authorAvatar } = req.body;
+    // --- Twitter logic (existing) ---
+    if (tweetUrl) {
+      if (!text || !tweetUrl || !authorName) {
+        return res.status(400).json({
+          error: 'Missing required fields',
+          required: ['text', 'tweetUrl', 'authorName']
+        });
+      }
+      // Check if tweet already exists in database
+      const { data: existingTweet, error: queryError } = await supabase
+        .from('processed_tweets')
+        .select('*')
+        .eq('tweet_url', tweetUrl)
+        .single();
+      if (existingTweet) {
+        return res.json({
+          name: existingTweet.token_name,
+          ticker: existingTweet.token_ticker,
+          description: existingTweet.token_description,
+          image: existingTweet.token_image,
+          twitterUrl: existingTweet.token_twitter || tweetUrl
+        });
+      }
+      // Generate meme token data with OpenAI (Twitter)
+      const prompt = `Given this tweet:\nText: "${text}"\nAuthor: ${authorName}\nGenerate a meme token based on this tweet with the following format:\n{\n  "name": "A catchy, meme-worthy name based on the tweet's theme or author (max 3 words)",\n  "ticker": "A 3-6 letter acronym or playful reference to the name",\n  "description": "A one-sentence meme-worthy summary of the tweet (max 15 words)"\n}\nMake it funny and viral-worthy.`;
+      console.log('[OpenAI][Twitter] Prompt being sent:', prompt);
+      console.log('[OpenAI][Twitter] Data:', { text, mediaUrls, tweetUrl, authorName, authorAvatar });
+      let tokenData;
+      try {
+        const completion = await openai.chat.completions.create({
+          model: "gpt-4",
+          messages: [
+            { role: "system", content: "You are a creative meme token generator. Generate funny, viral-worthy token names and descriptions based on tweets." },
+            { role: "user", content: prompt }
+          ],
+          temperature: 0.7,
+        });
+        const response = completion.choices[0].message.content;
+        console.log('[OpenAI][Twitter] Raw response:', response);
+        tokenData = JSON.parse(response);
+        console.log('[OpenAI][Twitter] Parsed tokenData:', tokenData);
+      } catch (error) {
+        console.error('OpenAI API error:', error);
+        throw new Error('Failed to generate token data');
+      }
+      // Pick best image: first media or author avatar
+      tokenData.image = (mediaUrls && mediaUrls.length > 0) ? mediaUrls[0] : authorAvatar;
+      tokenData.twitterUrl = tweetUrl;
+      // Cache the generated metadata in Supabase
+      try {
+        await supabase.from('processed_tweets').insert({
+          tweet_url: tweetUrl,
+          tweet_text: text,
+          author_name: authorName,
+          author_avatar: authorAvatar,
+          media_urls: mediaUrls,
+          token_name: tokenData.name,
+          token_ticker: tokenData.ticker,
+          token_description: tokenData.description,
+          token_image: tokenData.image,
+          token_twitter: tweetUrl
+        });
+      } catch (e) {
+        console.warn('Failed to cache token metadata in Supabase:', e.message);
+      }
+      const twitterResponse = {
+        name: tokenData.name,
+        ticker: tokenData.ticker,
+        description: tokenData.description,
+        image: tokenData.image,
+        twitterUrl: tokenData.twitterUrl
+      };
+      console.log('[OpenAI][Twitter] Final response to client:', twitterResponse);
+      res.json(twitterResponse);
+      return;
     }
-    // Check if tweet already exists in database
-    const { data: existingTweet, error: queryError } = await supabase
-      .from('processed_tweets')
-      .select('*')
-      .eq('tweet_url', tweetUrl)
-      .single();
-    if (existingTweet) {
-      return res.json({
-        name: existingTweet.token_name,
-        ticker: existingTweet.token_ticker,
-        description: existingTweet.token_description,
-        image: existingTweet.token_image,
-        twitterUrl: existingTweet.token_twitter || tweetUrl
-      });
+    // --- Reddit logic (new) ---
+    if (postUrl) {
+      if (!text || !postUrl || !authorName) {
+        return res.status(400).json({
+          error: 'Missing required fields',
+          required: ['text', 'postUrl', 'authorName']
+        });
+      }
+      // Generate meme token data with OpenAI (Reddit)
+      const prompt = `Given this Reddit post:\nText: "${text}"\nAuthor: ${authorName}\nGenerate a meme token based on this post with the following format:\n{\n  "name": "A catchy, meme-worthy name based on the post's theme or author (max 3 words)",\n  "ticker": "A 3-6 letter acronym or playful reference to the name",\n  "description": "A one-sentence meme-worthy summary of the post (max 15 words)"\n}\nMake it funny and viral-worthy.`;
+      console.log('[OpenAI][Reddit] Prompt being sent:', prompt);
+      console.log('[OpenAI][Reddit] Data:', { text, mediaUrls, postUrl, authorName, authorAvatar });
+      let tokenData;
+      try {
+        const completion = await openai.chat.completions.create({
+          model: "gpt-4",
+          messages: [
+            { role: "system", content: "You are a creative meme token generator. Generate funny, viral-worthy token names and descriptions based on Reddit posts." },
+            { role: "user", content: prompt }
+          ],
+          temperature: 0.7,
+        });
+        const response = completion.choices[0].message.content;
+        console.log('[OpenAI][Reddit] Raw response:', response);
+        tokenData = JSON.parse(response);
+        console.log('[OpenAI][Reddit] Parsed tokenData:', tokenData);
+      } catch (error) {
+        console.error('OpenAI API error:', error);
+        throw new Error('Failed to generate token data');
+      }
+      // Pick best image: first media or author avatar
+      tokenData.image = (mediaUrls && mediaUrls.length > 0) ? mediaUrls[0] : authorAvatar;
+      tokenData.redditUrl = postUrl;
+      const redditResponse = {
+        name: tokenData.name,
+        ticker: tokenData.ticker,
+        description: tokenData.description,
+        image: tokenData.image,
+        redditUrl: tokenData.redditUrl
+      };
+      console.log('[OpenAI][Reddit] Final response to client:', redditResponse);
+      res.json(redditResponse);
+      return;
     }
-    // Generate meme token data with OpenAI
-    const prompt = `Given this tweet:\nText: "${text}"\nAuthor: ${authorName}\nGenerate a meme token based on this tweet with the following format:\n{\n  "name": "A catchy, meme-worthy name based on the tweet's theme or author (max 3 words)",\n  "ticker": "A 3-6 letter acronym or playful reference to the name",\n  "description": "A one-sentence meme-worthy summary of the tweet (max 15 words)"\n}\nMake it funny and viral-worthy.`;
-    let tokenData;
-    try {
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4",
-        messages: [
-          { role: "system", content: "You are a creative meme token generator. Generate funny, viral-worthy token names and descriptions based on tweets." },
-          { role: "user", content: prompt }
-        ],
-        temperature: 0.7,
-      });
-      const response = completion.choices[0].message.content;
-      tokenData = JSON.parse(response);
-    } catch (error) {
-      console.error('OpenAI API error:', error);
-      throw new Error('Failed to generate token data');
-    }
-    // Pick best image: first media or author avatar
-    tokenData.image = (mediaUrls && mediaUrls.length > 0) ? mediaUrls[0] : authorAvatar;
-    tokenData.twitterUrl = tweetUrl;
-    // Cache the generated metadata in Supabase
-    try {
-      await supabase.from('processed_tweets').insert({
-        tweet_url: tweetUrl,
-        tweet_text: text,
-        author_name: authorName,
-        author_avatar: authorAvatar,
-        media_urls: mediaUrls,
-        token_name: tokenData.name,
-        token_ticker: tokenData.ticker,
-        token_description: tokenData.description,
-        token_image: tokenData.image,
-        token_twitter: tweetUrl
-      });
-    } catch (e) {
-      console.warn('Failed to cache token metadata in Supabase:', e.message);
-    }
-    res.json({
-      name: tokenData.name,
-      ticker: tokenData.ticker,
-      description: tokenData.description,
-      image: tokenData.image,
-      twitterUrl: tokenData.twitterUrl
-    });
+    // fallback
+    return res.status(400).json({ error: 'Missing tweetUrl or postUrl' });
   } catch (error) {
     console.error('Token metadata generation error:', error);
     res.status(500).json({
       error: 'Failed to generate token metadata',
       message: error.message
     });
+  }
+});
+
+// --- Proxy Image Endpoint ---
+app.get('/api/proxy-image', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).send('Missing url parameter');
+  try {
+    const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!response.ok) return res.status(500).send('Failed to fetch image');
+    res.set('Content-Type', response.headers.get('content-type') || 'image/jpeg');
+    response.body.pipe(res);
+  } catch (err) {
+    res.status(500).send('Failed to fetch image');
   }
 });
 
@@ -1150,6 +1222,31 @@ function loadDopplerEnv() {
   }
 }
 loadDopplerEnv();
+
+// --- Endpoint to get SOL price ---
+app.get('/api/sol-price', async (req, res) => {
+  try {
+    if (!MORALIS_API_KEY) {
+      return res.status(500).json({ error: 'MORALIS_API_KEY not configured' });
+    }
+
+    const response = await axios.get(
+      'https://solana-gateway.moralis.io/token/mainnet/So11111111111111111111111111111111111111112/price',
+      {
+        headers: {
+          'Accept': 'application/json',
+          'X-API-Key': MORALIS_API_KEY
+        }
+      }
+    );
+
+    const solPrice = response.data?.usdPrice || 0;
+    res.json({ price: solPrice });
+  } catch (error) {
+    console.error('Error fetching SOL price:', error);
+    res.status(500).json({ error: 'Failed to fetch SOL price', price: 0 });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
