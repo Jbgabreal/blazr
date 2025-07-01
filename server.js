@@ -54,12 +54,13 @@ app.use((req, res, next) => {
   next();
 });
 
-// Enable CORS with specific options
+// Enable CORS with origins from environment variable
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean);
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps, curl, etc.)
     if (!origin) return callback(null, true);
-    if (origin.startsWith('chrome-extension://') || origin === 'http://localhost:3000') {
+    if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
     return callback(new Error('Not allowed by CORS'));
@@ -1052,21 +1053,371 @@ app.get('/api/created-tokens', async (req, res) => {
   }
 });
 
+// --- Test Endpoint for Token Creation (No SOL Cost) ---
+app.post('/api/test/create-token', async (req, res) => {
+  try {
+    const { 
+      mint, 
+      name, 
+      symbol, 
+      description, 
+      image, 
+      publicKey, 
+      website,
+      twitter,
+      telegram
+    } = req.body;
+
+    if (!mint || !name || !symbol || !publicKey) {
+      return res.status(400).json({ 
+        error: 'Missing required fields',
+        required: ['mint', 'name', 'symbol', 'publicKey']
+      });
+    }
+
+    // Generate a fake transaction signature for testing
+    const fakeSignature = 'test_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    
+    console.log('[TEST] Simulating token creation:', {
+      mint,
+      name,
+      symbol,
+      description,
+      publicKey,
+      fakeSignature
+    });
+
+    // Save to database with is_test flag
+    const { data, error } = await supabase
+      .from('created_tokens')
+      .insert({
+        mint_address: mint,
+        token_name: name,
+        token_symbol: symbol,
+        token_description: description || '',
+        metadata: {
+          name,
+          symbol,
+          description: description || '',
+          imageFile: image || '',
+          website: website || '',
+          twitter: twitter || '',
+          telegram: telegram || ''
+        },
+        user_public_key: publicKey,
+        created_at: new Date().toISOString(),
+        tx_signature: fakeSignature,
+        is_test: true
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('[TEST] Database insert error:', error);
+      throw error;
+    }
+
+    console.log('[TEST] Token saved to database successfully:', data);
+
+    res.json({ 
+      success: true, 
+      token: data,
+      signature: fakeSignature,
+      message: 'Test token created successfully (no SOL cost)',
+      isTest: true
+    });
+  } catch (err) {
+    console.error('[TEST] Create token error:', err);
+    res.status(500).json({ 
+      error: 'Failed to create test token',
+      details: err.message 
+    });
+  }
+});
+
+// --- Endpoint to CREATE a new token (for token launch) ---
+app.post('/api/created-tokens', async (req, res) => {
+  try {
+    const { 
+      mint, 
+      name, 
+      symbol, 
+      description, 
+      image, 
+      publicKey, 
+      launchedAt, 
+      txSignature,
+      website,
+      twitter,
+      telegram
+    } = req.body;
+
+    if (!mint || !name || !symbol || !publicKey) {
+      return res.status(400).json({ 
+        error: 'Missing required fields',
+        required: ['mint', 'name', 'symbol', 'publicKey']
+      });
+    }
+
+    const { data, error } = await supabase
+      .from('created_tokens')
+      .insert({
+        mint_address: mint,
+        token_name: name,
+        token_symbol: symbol,
+        token_description: description || '',
+        metadata: {
+          name,
+          symbol,
+          description: description || '',
+          imageFile: image || '',
+          website: website || '',
+          twitter: twitter || '',
+          telegram: telegram || ''
+        },
+        user_public_key: publicKey,
+        created_at: launchedAt ? new Date(launchedAt).toISOString() : new Date().toISOString(),
+        tx_signature: txSignature || null,
+        is_test: false
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Database insert error:', error);
+      throw error;
+    }
+
+    res.json({ 
+      success: true, 
+      token: data,
+      message: 'Token created successfully' 
+    });
+  } catch (err) {
+    console.error('Create token error:', err);
+    res.status(500).json({ 
+      error: 'Failed to create token',
+      details: err.message 
+    });
+  }
+});
+
 // --- Endpoint to fetch tokens created BY A USER (for dashboard/portfolio) ---
 app.get('/api/created-tokens/user', async (req, res) => {
+  try {
+    const { publicKey, testMode } = req.query;
+    if (!publicKey) {
+      return res.status(400).json({ error: 'Missing publicKey' });
+    }
+    
+    // Filter by test mode if specified
+    let query = supabase
+      .from('created_tokens')
+      .select('*')
+      .eq('user_public_key', publicKey);
+    
+    if (testMode === 'true') {
+      query = query.eq('is_test', true);
+    } else if (testMode === 'false') {
+      query = query.eq('is_test', false);
+    }
+    // If testMode is not specified, return all tokens (both test and real)
+    
+    const { data, error } = await query.order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ tokens: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Endpoint to get user's test tokens (for global test mode) ---
+app.get('/api/test-tokens/user', async (req, res) => {
   try {
     const { publicKey } = req.query;
     if (!publicKey) {
       return res.status(400).json({ error: 'Missing publicKey' });
     }
+    
+    // Get only test tokens for the user
     const { data, error } = await supabase
       .from('created_tokens')
       .select('*')
       .eq('user_public_key', publicKey)
+      .eq('is_test', true)
       .order('created_at', { ascending: false });
+    
     if (error) throw error;
-    res.json({ tokens: data });
+    
+    // Transform data to match token format expected by frontend
+    const transformedTokens = data.map(token => ({
+      mint: token.mint_address,
+      owner: token.user_public_key,
+      amount: '0', // Test tokens don't have real balances
+      decimals: 9,
+      uiAmount: 0,
+      symbol: token.token_symbol || token.metadata?.symbol,
+      name: token.token_name || token.metadata?.name,
+      image: token.metadata?.imageFile || token.metadata?.image,
+      usdPrice: null, // Test tokens don't have real prices
+      usdValue: null,
+      priceChange24h: null,
+      balance: 0,
+      address: token.mint_address,
+      isCreatedByUser: true,
+      description: token.metadata?.description || token.token_description,
+      launched_at: token.created_at,
+      is_test: true
+    }));
+    
+    res.json({ tokens: transformedTokens });
   } catch (err) {
+    console.error('[TEST-TOKENS-USER] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Endpoint to get test token balances (always returns 0 for test tokens) ---
+app.post('/api/test-token-balances', async (req, res) => {
+  try {
+    const { publicKey, mints } = req.body;
+    if (!publicKey || !mints || !Array.isArray(mints)) {
+      return res.status(400).json({ error: 'Missing publicKey or mints array' });
+    }
+    
+    // For test tokens, return zero balances since they don't exist on-chain
+    const testBalances = mints.map(mint => ({
+      mint,
+      owner: publicKey,
+      amount: '0',
+      decimals: 9,
+      uiAmount: 0,
+      balance: 0
+    }));
+    
+    res.json({ tokens: testBalances });
+  } catch (err) {
+    console.error('[TEST-TOKEN-BALANCES] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Endpoint to get test token metadata and price (database only, no external APIs) ---
+app.get('/api/test-token/:mint', async (req, res) => {
+  try {
+    const { mint } = req.params;
+    if (!mint) {
+      return res.status(400).json({ error: 'Missing mint address' });
+    }
+
+    // Get test token from database
+    const { data, error } = await supabase
+      .from('created_tokens')
+      .select('*')
+      .eq('mint_address', mint)
+      .eq('is_test', true)
+      .single();
+
+    if (error || !data) {
+      return res.status(404).json({ error: 'Test token not found' });
+    }
+
+    // Return database data only - no external API calls for test tokens
+    const tokenData = {
+      mint: data.mint_address,
+      name: data.token_name || data.metadata?.name,
+      symbol: data.token_symbol || data.metadata?.symbol,
+      description: data.metadata?.description || data.token_description,
+      image: data.metadata?.imageFile || data.metadata?.image,
+      website: data.metadata?.website,
+      twitter: data.metadata?.twitter,
+      telegram: data.metadata?.telegram,
+      created_at: data.created_at,
+      tx_signature: data.tx_signature,
+      is_test: true,
+      // Test tokens don't have real price data, so we return null
+      usdPrice: null,
+      priceChange24h: null,
+      marketCap: null,
+      volume24h: null
+    };
+
+    res.json({ token: tokenData });
+  } catch (err) {
+    console.error('[TEST-TOKEN] Error fetching test token:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Endpoint to get test token price (always returns null for test tokens) ---
+app.get('/api/test-token/:mint/price', async (req, res) => {
+  try {
+    const { mint } = req.params;
+    if (!mint) {
+      return res.status(400).json({ error: 'Missing mint address' });
+    }
+
+    // Verify this is actually a test token
+    const { data, error } = await supabase
+      .from('created_tokens')
+      .select('mint_address, is_test')
+      .eq('mint_address', mint)
+      .eq('is_test', true)
+      .single();
+
+    if (error || !data) {
+      return res.status(404).json({ error: 'Test token not found' });
+    }
+
+    // Test tokens don't have real price data
+    res.json({ 
+      price: null,
+      message: 'Test tokens do not have on-chain price data',
+      is_test: true
+    });
+  } catch (err) {
+    console.error('[TEST-TOKEN-PRICE] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Endpoint to get test token metadata (database only) ---
+app.get('/api/test-token/:mint/metadata', async (req, res) => {
+  try {
+    const { mint } = req.params;
+    if (!mint) {
+      return res.status(400).json({ error: 'Missing mint address' });
+    }
+
+    // Get test token metadata from database
+    const { data, error } = await supabase
+      .from('created_tokens')
+      .select('*')
+      .eq('mint_address', mint)
+      .eq('is_test', true)
+      .single();
+
+    if (error || !data) {
+      return res.status(404).json({ error: 'Test token not found' });
+    }
+
+    // Return database metadata only - no external API calls for test tokens
+    const metadata = {
+      mint: data.mint_address,
+      name: data.token_name || data.metadata?.name,
+      symbol: data.token_symbol || data.metadata?.symbol,
+      description: data.metadata?.description || data.token_description,
+      image: data.metadata?.imageFile || data.metadata?.image,
+      website: data.metadata?.website,
+      twitter: data.metadata?.twitter,
+      telegram: data.metadata?.telegram,
+      decimals: 9, // Default for test tokens
+      is_test: true
+    };
+
+    res.json({ metadata });
+  } catch (err) {
+    console.error('[TEST-TOKEN-METADATA] Error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1245,6 +1596,99 @@ app.get('/api/sol-price', async (req, res) => {
   } catch (error) {
     console.error('Error fetching SOL price:', error);
     res.status(500).json({ error: 'Failed to fetch SOL price', price: 0 });
+  }
+});
+
+// --- Database Migration Endpoint ---
+app.post('/api/migrate/add-test-column', async (req, res) => {
+  try {
+    console.log('[MIGRATION] Starting migration to add is_test column');
+    
+    // Check if column already exists
+    const { data: existingColumns, error: checkError } = await supabase
+      .from('information_schema.columns')
+      .select('column_name')
+      .eq('table_name', 'created_tokens')
+      .eq('column_name', 'is_test');
+    
+    if (checkError) {
+      console.error('[MIGRATION] Error checking existing columns:', checkError);
+      throw new Error('Failed to check existing columns');
+    }
+    
+    if (existingColumns && existingColumns.length > 0) {
+      console.log('[MIGRATION] is_test column already exists');
+      return res.json({ 
+        success: true, 
+        message: 'is_test column already exists',
+        alreadyExists: true 
+      });
+    }
+    
+    // Add the is_test column
+    console.log('[MIGRATION] Adding is_test column...');
+    const { error: alterError } = await supabase.rpc('exec_sql', {
+      sql: 'ALTER TABLE created_tokens ADD COLUMN is_test BOOLEAN DEFAULT false'
+    });
+    
+    if (alterError) {
+      console.error('[MIGRATION] Error adding column:', alterError);
+      throw new Error(`Failed to add is_test column: ${alterError.message}`);
+    }
+    
+    // Update existing records to mark them as real tokens
+    console.log('[MIGRATION] Updating existing records...');
+    const { error: updateError } = await supabase
+      .from('created_tokens')
+      .update({ is_test: false })
+      .is('is_test', null);
+    
+    if (updateError) {
+      console.error('[MIGRATION] Error updating existing records:', updateError);
+      // Don't throw here, as the column was added successfully
+      console.warn('[MIGRATION] Warning: Could not update existing records');
+    }
+    
+    // Make the column NOT NULL
+    console.log('[MIGRATION] Making column NOT NULL...');
+    const { error: notNullError } = await supabase.rpc('exec_sql', {
+      sql: 'ALTER TABLE created_tokens ALTER COLUMN is_test SET NOT NULL'
+    });
+    
+    if (notNullError) {
+      console.error('[MIGRATION] Error making column NOT NULL:', notNullError);
+      throw new Error(`Failed to make is_test NOT NULL: ${notNullError.message}`);
+    }
+    
+    // Add indexes for better performance
+    console.log('[MIGRATION] Adding indexes...');
+    try {
+      await supabase.rpc('exec_sql', {
+        sql: 'CREATE INDEX IF NOT EXISTS idx_created_tokens_is_test ON created_tokens(is_test)'
+      });
+      
+      await supabase.rpc('exec_sql', {
+        sql: 'CREATE INDEX IF NOT EXISTS idx_created_tokens_user_test ON created_tokens(user_public_key, is_test)'
+      });
+    } catch (indexError) {
+      console.warn('[MIGRATION] Warning: Could not create indexes:', indexError);
+      // Don't fail the migration for index errors
+    }
+    
+    console.log('[MIGRATION] Migration completed successfully');
+    res.json({ 
+      success: true, 
+      message: 'is_test column added successfully',
+      migration: 'add-test-column',
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (err) {
+    console.error('[MIGRATION] Migration failed:', err);
+    res.status(500).json({ 
+      error: 'Migration failed',
+      details: err.message 
+    });
   }
 });
 
