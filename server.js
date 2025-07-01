@@ -58,6 +58,7 @@ app.use((req, res, next) => {
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean);
 app.use(cors({
   origin: function (origin, callback) {
+    console.log('[CORS DEBUG]', { origin, allowedOrigins });
     if (!origin) return callback(null, true);
     // Always allow any Chrome extension
     if (origin.startsWith('chrome-extension://')) {
