@@ -1051,12 +1051,94 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
 // --- Endpoint to fetch ALL created tokens (for landing page, public, etc.) ---
 app.get('/api/created-tokens', async (req, res) => {
   try {
+    const { includeRealtimeData = 'false' } = req.query;
+    
+    // Get tokens from database with explicit market cap fields
     const { data, error } = await supabase
       .from('created_tokens')
-      .select('*')
+      .select(`
+        *,
+        market_cap,
+        last_market_cap_update
+      `)
       .order('created_at', { ascending: false });
+    
     if (error) throw error;
-    res.json({ tokens: data });
+
+    // If real-time data is requested, fetch from Pump Portal
+    if (includeRealtimeData === 'true' && data && data.length > 0) {
+      try {
+        // Get real-time market cap data from Pump Portal
+        const pumpPortalResponse = await axios.get('https://pumpportal.fun/data-api/real-time', {
+          timeout: 10000,
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          }
+        });
+
+        if (pumpPortalResponse.data && Array.isArray(pumpPortalResponse.data)) {
+          // Create a map of real-time data
+          const realtimeDataMap = new Map();
+          pumpPortalResponse.data.forEach(token => {
+            if (token.mint) {
+              realtimeDataMap.set(token.mint, {
+                marketCap: token.marketCap || null,
+                price: token.price || null,
+                volume24h: token.volume24h || null,
+                lastUpdated: new Date().toISOString()
+              });
+            }
+          });
+
+          // Merge real-time data with database data
+          const enhancedTokens = data.map(token => {
+            const realtimeData = realtimeDataMap.get(token.mint_address);
+            return {
+              ...token,
+              // Use real-time data if available, otherwise use database data
+              market_cap: realtimeData?.marketCap || token.market_cap,
+              price: realtimeData?.price || null,
+              volume24h: realtimeData?.volume24h || null,
+              last_market_cap_update: realtimeData?.lastUpdated || token.last_market_cap_update,
+              // Add flag to indicate if real-time data was used
+              has_realtime_data: !!realtimeData
+            };
+          });
+
+          res.json({ 
+            tokens: enhancedTokens,
+            realtime_data_included: true,
+            total_tokens: enhancedTokens.length,
+            tokens_with_realtime_data: enhancedTokens.filter(t => t.has_realtime_data).length
+          });
+        } else {
+          // Fallback to database data only
+          res.json({ 
+            tokens: data,
+            realtime_data_included: false,
+            total_tokens: data.length,
+            error: 'Failed to fetch real-time data from Pump Portal'
+          });
+        }
+      } catch (realtimeError) {
+        console.warn('Failed to fetch real-time market cap data:', realtimeError.message);
+        // Return database data with warning
+        res.json({ 
+          tokens: data,
+          realtime_data_included: false,
+          total_tokens: data.length,
+          warning: 'Real-time data unavailable, using cached data'
+        });
+      }
+    } else {
+      // Return database data only
+      res.json({ 
+        tokens: data,
+        realtime_data_included: false,
+        total_tokens: data.length
+      });
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1214,7 +1296,7 @@ app.post('/api/created-tokens', async (req, res) => {
 // --- Endpoint to fetch tokens created BY A USER (for dashboard/portfolio) ---
 app.get('/api/created-tokens/user', async (req, res) => {
   try {
-    const { publicKey, testMode } = req.query;
+    const { publicKey, testMode, includeRealtimeData = 'false' } = req.query;
     if (!publicKey) {
       return res.status(400).json({ error: 'Missing publicKey' });
     }
@@ -1222,7 +1304,11 @@ app.get('/api/created-tokens/user', async (req, res) => {
     // Filter by test mode if specified
     let query = supabase
       .from('created_tokens')
-      .select('*')
+      .select(`
+        *,
+        market_cap,
+        last_market_cap_update
+      `)
       .eq('user_public_key', publicKey);
     
     if (testMode === 'true') {
@@ -1234,7 +1320,81 @@ app.get('/api/created-tokens/user', async (req, res) => {
     
     const { data, error } = await query.order('created_at', { ascending: false });
     if (error) throw error;
-    res.json({ tokens: data });
+
+    // If real-time data is requested and not in test mode, fetch from Pump Portal
+    if (includeRealtimeData === 'true' && testMode !== 'true' && data && data.length > 0) {
+      try {
+        // Get real-time market cap data from Pump Portal
+        const pumpPortalResponse = await axios.get('https://pumpportal.fun/data-api/real-time', {
+          timeout: 10000,
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          }
+        });
+
+        if (pumpPortalResponse.data && Array.isArray(pumpPortalResponse.data)) {
+          // Create a map of real-time data
+          const realtimeDataMap = new Map();
+          pumpPortalResponse.data.forEach(token => {
+            if (token.mint) {
+              realtimeDataMap.set(token.mint, {
+                marketCap: token.marketCap || null,
+                price: token.price || null,
+                volume24h: token.volume24h || null,
+                lastUpdated: new Date().toISOString()
+              });
+            }
+          });
+
+          // Merge real-time data with database data
+          const enhancedTokens = data.map(token => {
+            const realtimeData = realtimeDataMap.get(token.mint_address);
+            return {
+              ...token,
+              // Use real-time data if available, otherwise use database data
+              market_cap: realtimeData?.marketCap || token.market_cap,
+              price: realtimeData?.price || null,
+              volume24h: realtimeData?.volume24h || null,
+              last_market_cap_update: realtimeData?.lastUpdated || token.last_market_cap_update,
+              // Add flag to indicate if real-time data was used
+              has_realtime_data: !!realtimeData
+            };
+          });
+
+          res.json({ 
+            tokens: enhancedTokens,
+            realtime_data_included: true,
+            total_tokens: enhancedTokens.length,
+            tokens_with_realtime_data: enhancedTokens.filter(t => t.has_realtime_data).length
+          });
+        } else {
+          // Fallback to database data only
+          res.json({ 
+            tokens: data,
+            realtime_data_included: false,
+            total_tokens: data.length,
+            error: 'Failed to fetch real-time data from Pump Portal'
+          });
+        }
+      } catch (realtimeError) {
+        console.warn('Failed to fetch real-time market cap data:', realtimeError.message);
+        // Return database data with warning
+        res.json({ 
+          tokens: data,
+          realtime_data_included: false,
+          total_tokens: data.length,
+          warning: 'Real-time data unavailable, using cached data'
+        });
+      }
+    } else {
+      // Return database data only
+      res.json({ 
+        tokens: data,
+        realtime_data_included: false,
+        total_tokens: data.length
+      });
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1431,6 +1591,51 @@ app.get('/api/test-token/:mint/metadata', async (req, res) => {
   }
 });
 
+// --- Supported Tickers API ---
+// Get all supported tickers
+app.get('/api/supported-tickers', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('supported_tickers')
+      .select('*');
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ tickers: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Add or update one or more supported tickers (accepts single object or array)
+app.post('/api/supported-tickers', async (req, res) => {
+  try {
+    let tickers = req.body;
+    if (!Array.isArray(tickers)) {
+      tickers = [tickers]; // Support single object for backward compatibility
+    }
+    // Validate all
+    for (const t of tickers) {
+      if (!t.ticker || !t.mint_address) {
+        return res.status(400).json({ error: 'Each object must have ticker and mint_address' });
+      }
+    }
+    // Upsert all
+    const { data, error } = await supabase
+      .from('supported_tickers')
+      .upsert(
+        tickers.map(t => ({
+          ticker: t.ticker.toUpperCase(),
+          mint_address: t.mint_address
+        })),
+        { onConflict: 'ticker' }
+      )
+      .select();
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ tickers: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Add root route handler
 app.get('/', (req, res) => {
   res.json({ message: 'Server is running' });
@@ -1608,6 +1813,183 @@ app.get('/api/sol-price', async (req, res) => {
   }
 });
 
+// --- Market Cap Management Endpoints ---
+
+// Get market cap data for a specific token
+app.get('/api/token/:mint/market-cap', async (req, res) => {
+  try {
+    const { mint } = req.params;
+    if (!mint) {
+      return res.status(400).json({ error: 'Missing mint address' });
+    }
+
+    // Get market cap data from database
+    const { data, error } = await supabase
+      .from('created_tokens')
+      .select('market_cap, last_market_cap_update')
+      .eq('mint_address', mint)
+      .single();
+
+    if (error) {
+      console.error('Database error fetching market cap:', error);
+      return res.status(500).json({ error: 'Failed to fetch market cap data' });
+    }
+
+    if (!data) {
+      return res.status(404).json({ error: 'Token not found' });
+    }
+
+    res.json({
+      mint,
+      marketCap: data.market_cap,
+      lastUpdated: data.last_market_cap_update,
+      price: null, // We'll need to fetch this separately if needed
+      volume24h: null // We'll need to fetch this separately if needed
+    });
+  } catch (err) {
+    console.error('Error fetching market cap:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update market cap data for a specific token
+app.post('/api/token/:mint/market-cap', async (req, res) => {
+  try {
+    const { mint } = req.params;
+    const { marketCap, price, volume24h } = req.body;
+
+    if (!mint) {
+      return res.status(400).json({ error: 'Missing mint address' });
+    }
+
+    if (marketCap === undefined && price === undefined && volume24h === undefined) {
+      return res.status(400).json({ error: 'At least one field (marketCap, price, volume24h) is required' });
+    }
+
+    const updateData = {
+      last_market_cap_update: new Date().toISOString()
+    };
+
+    if (marketCap !== undefined) updateData.market_cap = marketCap;
+
+    // Update the token in database
+    const { data, error } = await supabase
+      .from('created_tokens')
+      .update(updateData)
+      .eq('mint_address', mint)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Database error updating market cap:', error);
+      return res.status(500).json({ error: 'Failed to update market cap data' });
+    }
+
+    if (!data) {
+      return res.status(404).json({ error: 'Token not found' });
+    }
+
+    res.json({
+      success: true,
+      token: {
+        mint: data.mint_address,
+        marketCap: data.market_cap,
+        lastUpdated: data.last_market_cap_update
+      }
+    });
+  } catch (err) {
+    console.error('Error updating market cap:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk update market cap data for multiple tokens
+app.post('/api/tokens/market-cap/bulk-update', async (req, res) => {
+  try {
+    const { tokens } = req.body;
+
+    if (!tokens || !Array.isArray(tokens)) {
+      return res.status(400).json({ error: 'tokens array is required' });
+    }
+
+    const results = [];
+    const errors = [];
+
+    for (const tokenData of tokens) {
+      try {
+        const { mint, marketCap, price, volume24h } = tokenData;
+        
+        if (!mint) {
+          errors.push({ mint: 'unknown', error: 'Missing mint address' });
+          continue;
+        }
+
+        const updateData = {
+          last_market_cap_update: new Date().toISOString()
+        };
+
+        if (marketCap !== undefined) updateData.market_cap = marketCap;
+
+        const { data, error } = await supabase
+          .from('created_tokens')
+          .update(updateData)
+          .eq('mint_address', mint)
+          .select()
+          .single();
+
+        if (error) {
+          errors.push({ mint, error: error.message });
+        } else if (data) {
+          results.push({
+            mint: data.mint_address,
+            marketCap: data.market_cap,
+            lastUpdated: data.last_market_cap_update
+          });
+        }
+      } catch (err) {
+        errors.push({ mint: tokenData.mint || 'unknown', error: err.message });
+      }
+    }
+
+    res.json({
+      success: true,
+      updated: results.length,
+      failed: errors.length,
+      results,
+      errors
+    });
+  } catch (err) {
+    console.error('Error bulk updating market caps:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get all tokens that need market cap updates (older than 15 minutes)
+app.get('/api/tokens/needing-market-cap-update', async (req, res) => {
+  try {
+    const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    
+    const { data, error } = await supabase
+      .from('created_tokens')
+      .select('mint_address, token_name, token_symbol, market_cap, last_market_cap_update')
+      .or(`last_market_cap_update.is.null,last_market_cap_update.lt.${fifteenMinutesAgo}`)
+      .eq('is_test', false); // Only real tokens, not test tokens
+
+    if (error) {
+      console.error('Database error fetching tokens needing update:', error);
+      return res.status(500).json({ error: 'Failed to fetch tokens' });
+    }
+
+    res.json({
+      tokens: data || [],
+      count: data ? data.length : 0
+    });
+  } catch (err) {
+    console.error('Error fetching tokens needing market cap update:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- Database Migration Endpoint ---
 app.post('/api/migrate/add-test-column', async (req, res) => {
   try {
@@ -1701,8 +2083,157 @@ app.post('/api/migrate/add-test-column', async (req, res) => {
   }
 });
 
+// --- Market Cap Scheduler Management ---
+
+// Start market cap scheduler endpoint
+app.post('/api/market-cap-scheduler/start', async (req, res) => {
+  try {
+    const { intervalMinutes = 1 } = req.body;
+    
+    // Import and start the scheduler
+    const { marketCapScheduler } = require('./src/services/marketCap/scheduler');
+    marketCapScheduler.start(intervalMinutes);
+    
+    res.json({ 
+      success: true, 
+      message: `Market cap scheduler started with ${intervalMinutes} minute intervals` 
+    });
+  } catch (err) {
+    console.error('Error starting market cap scheduler:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Stop market cap scheduler endpoint
+app.post('/api/market-cap-scheduler/stop', async (req, res) => {
+  try {
+    const { marketCapScheduler } = require('./src/services/marketCap/scheduler');
+    marketCapScheduler.stop();
+    
+    res.json({ 
+      success: true, 
+      message: 'Market cap scheduler stopped' 
+    });
+  } catch (err) {
+    console.error('Error stopping market cap scheduler:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get market cap scheduler status endpoint
+app.get('/api/market-cap-scheduler/status', async (req, res) => {
+  try {
+    const { marketCapScheduler } = require('./src/services/marketCap/scheduler');
+    const lastJob = marketCapScheduler.getLastJobStatus();
+    
+    res.json({ 
+      success: true,
+      lastJob,
+      isRunning: lastJob?.status === 'running'
+    });
+  } catch (err) {
+    console.error('Error getting market cap scheduler status:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manually trigger market cap update endpoint
+app.post('/api/market-cap-scheduler/trigger-update', async (req, res) => {
+  try {
+    const { marketCapScheduler } = require('./src/services/marketCap/scheduler');
+    const job = await marketCapScheduler.triggerUpdate();
+    
+    res.json({ 
+      success: true,
+      job
+    });
+  } catch (err) {
+    console.error('Error triggering market cap update:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get token price status endpoint
+app.get('/api/token-price/status', async (req, res) => {
+  try {
+    if (!tokenPriceService) {
+      return res.status(503).json({ 
+        error: 'Token price service not available' 
+      });
+    }
+
+    const status = tokenPriceService.getStatus();
+    res.json({ 
+      success: true,
+      status
+    });
+  } catch (err) {
+    console.error('Error getting token price status:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get specific token price endpoint
+app.get('/api/token-price/:tokenMint', async (req, res) => {
+  try {
+    if (!tokenPriceService) {
+      return res.status(503).json({ 
+        error: 'Token price service not available' 
+      });
+    }
+
+    const { tokenMint } = req.params;
+    const priceData = await tokenPriceService.getTokenPrice(tokenMint);
+    
+    if (!priceData) {
+      return res.status(404).json({ 
+        error: 'Token price not available' 
+      });
+    }
+
+    res.json({ 
+      success: true,
+      tokenMint,
+      priceData
+    });
+  } catch (err) {
+    console.error('Error getting token price:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Import and initialize market cap scheduler
+let marketCapScheduler = null;
+try {
+  const { marketCapScheduler: scheduler } = require('./src/services/marketCap/scheduler');
+  marketCapScheduler = scheduler;
+  console.log('✅ Market cap scheduler imported successfully');
+} catch (error) {
+  console.warn('⚠️  Market cap scheduler not available:', error.message);
+}
+
+// Import token price service
+let tokenPriceService = null;
+try {
+  const { tokenPriceService: tokenService } = require('./src/services/marketCap/tokenPriceService');
+  tokenPriceService = tokenService;
+  console.log('✅ Token price service imported successfully');
+} catch (error) {
+  console.warn('⚠️  Token price service not available:', error.message);
+}
+
 app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
-  console.log('Available endpoints:');
+  console.log(`🚀 Server is running on http://localhost:${PORT}`);
+  console.log('📊 Market Cap Scheduler Status:', marketCapScheduler ? 'Available' : 'Not Available');
+  console.log('🔧 Available endpoints:');
   console.log('- POST /api/rpc/token-accounts');
+  console.log('- GET /api/created-tokens (with market cap data)');
+  console.log('- GET /api/market-cap-scheduler/status');
+  
+  if (marketCapScheduler) {
+    const status = marketCapScheduler.getLastJobStatus();
+    if (status) {
+      console.log(`📈 Last market cap update: ${status.status} (${status.tokensUpdated} tokens updated)`);
+    }
+  }
 });

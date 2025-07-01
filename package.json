@@ -4,8 +4,27 @@
   "description": "Proxy server for token generation and trading",
   "main": "server.js",
   "scripts": {
-    "start": "doppler run -- node server.js",
-    "dev": "doppler run -- nodemon server.js"
+    "start": "doppler run -- webpack --watch --mode=development",
+    "server": "doppler run -- nodemon server.js",
+    "server:start": "doppler run -- node scripts/start-production.js",
+    "server:prod": "doppler run -- NODE_ENV=production node scripts/start-production.js",
+    "dev": "doppler run -- concurrently \"webpack --watch --mode=development\" \"nodemon server.js\"",
+    "build": "doppler run -- webpack --mode=production",
+    "test": "doppler run -- react-scripts test",
+    "test:market-cap": "doppler run -- node scripts/test-market-cap.js",
+    "test:auto-start": "doppler run -- node scripts/test-auto-start.js",
+    "health:market-cap": "doppler run -- node scripts/check-scheduler-health.js",
+    "test:pumpportal": "node scripts/test-pumpportal.js",
+    "test:token": "node scripts/test-specific-token.js",
+    "test:conversion": "node scripts/test-market-cap-conversion.js",
+    "test:full": "node scripts/test-full-market-cap.js",
+    "test:logic": "node scripts/test-market-cap-logic.js",
+    "test:1min": "node scripts/test-1min-scheduler.js",
+    "test:config": "node scripts/test-scheduler-config.js",
+    "test:simple": "node scripts/test-simple-config.js",
+    "test:real": "node scripts/test-real-data.js",
+    "eject": "doppler run -- react-scripts eject",
+    "doppler-build": "doppler run -- npm run build"
   },
   "dependencies": {
     "@solana/spl-token": "^0.3.9",
@@ -21,7 +40,8 @@
     "form-data": "^4.0.0",
     "helius-sdk": "^1.0.12",
     "multer": "^1.4.5-lts.1",
-    "openai": "^4.24.1"
+    "openai": "^4.24.1",
+    "ws": "^8.16.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
