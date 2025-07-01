@@ -58,14 +58,17 @@ app.use((req, res, next) => {
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean);
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps, curl, etc.)
     if (!origin) return callback(null, true);
     // Always allow any Chrome extension
     if (origin.startsWith('chrome-extension://')) {
       return callback(null, true);
     }
-    // Allow origins from Doppler env var
+    // Allow exact matches
     if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    // Allow prefix matches for preview URLs
+    if (allowedOrigins.some(prefix => prefix && origin.startsWith(prefix))) {
       return callback(null, true);
     }
     return callback(new Error('Not allowed by CORS'));
