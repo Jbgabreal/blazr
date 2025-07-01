@@ -60,6 +60,11 @@ app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps, curl, etc.)
     if (!origin) return callback(null, true);
+    // Always allow any Chrome extension
+    if (origin.startsWith('chrome-extension://')) {
+      return callback(null, true);
+    }
+    // Allow origins from Doppler env var
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
