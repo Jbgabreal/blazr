@@ -74,6 +74,7 @@ function initializeWebSocket() {
  * Handle incoming WebSocket messages
  */
 function handleWebSocketMessage(message) {
+  console.log('🟢 [PumpPortal] Raw data received:', message);
   console.log('📡 Received WebSocket message from PumpPortal:');
   console.log('   Message type:', message.type || 'unknown');
   console.log('   Full message:', JSON.stringify(message, null, 2));
@@ -147,34 +148,23 @@ function getCachedTokenPrice(tokenAddress) {
 }
 
 /**
- * Generate mock market cap data for tokens without real data
- * This is a fallback for development/testing purposes
- */
-function generateMockMarketCapData(tokenAddress) {
-  // Generate a deterministic but varied market cap based on token address
-  const hash = tokenAddress.split('').reduce((a, b) => {
-    a = ((a << 5) - a) + b.charCodeAt(0);
-    return a & a;
-  }, 0);
-  
-  const baseMarketCapSol = (Math.abs(hash) % 100) + 1; // 1 to 100 SOL
-  const multiplier = 1 + (Math.abs(hash) % 5) / 10; // 1.0x to 1.5x
-  
-  return {
-    marketCapSol: baseMarketCapSol * multiplier,
-    lastTradeType: 'mock',
-    lastSolAmount: baseMarketCapSol * 0.01, // Small trade amount
-    lastTokenAmount: baseMarketCapSol * 1000, // Mock token amount
-    lastUpdated: new Date().toISOString(),
-    isMock: true
-  };
-}
-
-/**
- * Calculate market cap in USD using Jupiter token price
+ * Calculate market cap in USD using SOL price
  */
 async function calculateMarketCapInUsd(tokenMint, marketCapInSol) {
   try {
+    // If market cap is 0, return 0 for USD as well
+    if (marketCapInSol === 0) {
+      console.log(`💱 Market cap calculation for ${tokenMint}:`);
+      console.log(`   Market cap in SOL: 0`);
+      console.log(`   Market cap in USD: $0.00`);
+      return {
+        marketCapUsd: 0,
+        marketCapSol: 0,
+        solPrice: 0,
+        timestamp: new Date().toISOString()
+      };
+    }
+    
     const result = await tokenPriceService.calculateMarketCap(tokenMint, marketCapInSol);
     
     if (!result) {
@@ -194,15 +184,15 @@ async function calculateMarketCapInUsd(tokenMint, marketCapInSol) {
  */
 async function getTokensNeedingUpdate() {
   try {
-    const oneMinuteAgo = new Date(Date.now() - 1 * 60 * 1000).toISOString();
+    const fifteenSecondsAgo = new Date(Date.now() - 15 * 1000).toISOString();
     
     console.log('🔍 Fetching tokens needing market cap updates...');
-    console.log('   Cutoff time:', oneMinuteAgo);
+    console.log('   Cutoff time:', fifteenSecondsAgo);
     
     const { data, error } = await supabase
       .from('created_tokens')
       .select('id, mint_address, token_name, market_cap, last_market_cap_update')
-      .or(`last_market_cap_update.is.null,last_market_cap_update.lt.${oneMinuteAgo}`)
+      .or(`last_market_cap_update.is.null,last_market_cap_update.lt.${fifteenSecondsAgo}`)
       .eq('is_test', false) // Only update real tokens, not test tokens
       .order('last_market_cap_update', { ascending: true, nullsFirst: true });
 
@@ -236,23 +226,49 @@ async function updateTokenMarketCap(tokenId, tokenAddress) {
     let cachedData = getCachedTokenPrice(tokenAddress);
     
     let marketCapSol = null;
-    let dataSource = 'mock';
+    let dataSource = 'cached';
     
-    if (cachedData && cachedData.marketCapSol !== undefined) {
+    if (cachedData && cachedData.marketCapSol !== undefined && cachedData.marketCapSol > 0) {
       // Use real market cap data from PumpPortal
       marketCapSol = cachedData.marketCapSol;
       dataSource = 'real-time';
       console.log(`📊 Using real market cap data from PumpPortal: ${marketCapSol} SOL`);
     } else {
-      // Generate mock data for development/testing
-      console.log(`🔄 No cached data for ${tokenAddress}, generating mock data for development`);
-      const mockData = generateMockMarketCapData(tokenAddress);
-      marketCapSol = mockData.marketCapSol; // Mock data now returns marketCapSol directly
-      dataSource = 'mock';
-      console.log(`📊 Using mock market cap data: ${marketCapSol} SOL`);
+      // No new real data available, check if we have a cached value in database
+      console.log(`🔄 No new real data for ${tokenAddress}, checking cached value in database`);
+      
+      // Get current market cap from database to use as fallback
+      const { data: currentToken, error: dbError } = await supabase
+        .from('created_tokens')
+        .select('market_cap, last_market_cap_update')
+        .eq('id', tokenId)
+        .single();
+      
+      if (dbError) {
+        console.error(`❌ Error fetching current token data: ${dbError.message}`);
+        marketCapSol = 0;
+        dataSource = 'none';
+      } else if (currentToken && currentToken.market_cap && currentToken.market_cap > 0) {
+        // Use cached value from database (convert USD back to SOL for calculation)
+        const solPriceData = await tokenPriceService.getSolPrice();
+        if (solPriceData && solPriceData.price > 0) {
+          marketCapSol = currentToken.market_cap / solPriceData.price;
+          dataSource = 'cached';
+          console.log(`📊 Using cached market cap from database: ${marketCapSol.toFixed(4)} SOL (${currentToken.market_cap.toFixed(2)} USD)`);
+        } else {
+          marketCapSol = 0;
+          dataSource = 'none';
+          console.log(`📊 No SOL price available, using 0 for market cap`);
+        }
+      } else {
+        // No cached value available, use 0
+        marketCapSol = 0;
+        dataSource = 'none';
+        console.log(`📊 No cached value available, using 0 for market cap`);
+      }
     }
 
-    // Calculate market cap in USD using Jupiter token price
+    // Calculate market cap in USD using SOL price
     const marketCapResult = await calculateMarketCapInUsd(tokenAddress, marketCapSol);
 
     if (!marketCapResult) {
@@ -260,29 +276,34 @@ async function updateTokenMarketCap(tokenId, tokenAddress) {
       return { updated: false, error: 'Could not calculate market cap' };
     }
 
-    const { error } = await supabase
-      .from('created_tokens')
-      .update({
-        market_cap: marketCapResult.marketCapUsd, // Store USD value in database
-        last_market_cap_update: new Date().toISOString()
-      })
-      .eq('id', tokenId);
+    // Only update database if we have new real data or if we don't have any cached value
+    const shouldUpdate = dataSource === 'real-time' || (dataSource === 'none' && marketCapSol === 0);
+    
+    if (shouldUpdate) {
+      const { error } = await supabase
+        .from('created_tokens')
+        .update({
+          market_cap: marketCapResult.marketCapUsd, // Store USD value in database
+          last_market_cap_update: new Date().toISOString()
+        })
+        .eq('id', tokenId);
 
-    if (error) {
-      throw error;
+      if (error) {
+        throw error;
+      }
+    } else {
+      console.log(`📋 Skipping database update for ${tokenAddress} (using cached value)`);
     }
 
     console.log(`✅ Updated market cap for ${tokenAddress}:`);
     console.log(`   Market cap in SOL: ${marketCapResult.marketCapSol}`);
     console.log(`   Market cap in USD: $${marketCapResult.marketCapUsd.toFixed(2)}`);
-    console.log(`   Token price: $${marketCapResult.tokenPrice.toFixed(6)} USD`);
     console.log(`   Data source: ${dataSource}`);
     
     return { 
-      updated: true, 
+      updated: shouldUpdate, 
       marketCapUsd: marketCapResult.marketCapUsd,
       marketCapSol: marketCapResult.marketCapSol,
-      tokenPrice: marketCapResult.tokenPrice,
       dataSource
     };
   } catch (error) {
@@ -401,6 +422,5 @@ module.exports = {
   initializeWebSocket,
   subscribeToTokenTrades,
   getCachedTokenPrice,
-  generateMockMarketCapData,
   calculateMarketCapInUsd
 }; 

@@ -7,7 +7,7 @@
     "start": "doppler run -- webpack --watch --mode=development",
     "server": "doppler run -- nodemon server.js",
     "server:start": "doppler run -- node scripts/start-production.js",
-    "server:prod": "doppler run -- NODE_ENV=production node scripts/start-production.js",
+    "server:prod": "doppler run -- cross-env NODE_ENV=production node scripts/start-production.js",
     "dev": "doppler run -- concurrently \"webpack --watch --mode=development\" \"nodemon server.js\"",
     "build": "doppler run -- webpack --mode=production",
     "test": "doppler run -- react-scripts test",
@@ -44,6 +44,7 @@
     "ws": "^8.16.0"
   },
   "devDependencies": {
+    "cross-env": "^7.0.3",
     "nodemon": "^3.0.2"
   }
 }

@@ -46,4 +46,4 @@ process.on('SIGTERM', () => {
 
 console.log('✅ Startup script initialized');
 console.log('📊 Market cap scheduler will auto-start in all environments');
-console.log('⏰ Updates will run every 15 minutes\n'); 
+console.log('⏰ Updates will run every 15 seconds\n'); 

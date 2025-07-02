@@ -6,17 +6,17 @@ class MarketCapScheduler {
     this.interval = null;
     this.isRunning = false;
     this.lastJobStatus = null;
-    this.updateInterval = 1; // minutes
+    this.updateInterval = 0.25; // minutes (15 seconds)
   }
 
-  async start(intervalMinutes = 1) {
+  async start(intervalMinutes = 0.25) {
     if (this.isRunning) {
       console.log('⚠️  Market cap scheduler is already running');
       return;
     }
 
     this.updateInterval = intervalMinutes;
-    console.log(`🚀 Starting market cap scheduler with ${intervalMinutes} minute intervals`);
+    console.log(`🚀 Starting market cap scheduler with ${intervalMinutes} minute intervals (${intervalMinutes * 60} seconds)`);
 
     // Start the first update immediately
     await this.performUpdate();
@@ -102,7 +102,7 @@ const marketCapScheduler = new MarketCapScheduler();
 if (process.env.NODE_ENV !== 'test') {
       // Start with a small delay to ensure server is fully initialized
     setTimeout(() => {
-      marketCapScheduler.start(1);
+      marketCapScheduler.start(0.25);
     }, 5000);
 }
 

@@ -84,44 +84,40 @@ class TokenPriceService {
   }
 
   /**
-   * Calculate market cap in USD using token price and supply
+   * Calculate market cap in USD using only SOL price (no token price)
    */
   async calculateMarketCap(tokenMint, marketCapInSol) {
     try {
-      // Get token price in USD
-      const priceData = await this.getTokenPrice(tokenMint);
-      
-      if (!priceData) {
-        console.warn(`⚠️  No price data available for token: ${tokenMint}`);
-        return null;
+      // If market cap is 0, return 0 for USD as well
+      if (marketCapInSol === 0) {
+        console.log(`💱 Market cap calculation for ${tokenMint}:`);
+        console.log(`   Market cap in SOL: 0`);
+        console.log(`   Market cap in USD: $0.00`);
+        return {
+          marketCapUsd: 0,
+          solPrice: 0,
+          marketCapSol: 0,
+          timestamp: new Date().toISOString()
+        };
       }
-
-      // Calculate market cap in USD
-      // marketCapInSol is the market cap value from PumpPortal (in SOL)
-      // We need to convert this to USD using SOL price, not token price
-      // First, get SOL price in USD
-      const solPriceData = await this.getSolPrice();
       
+      // Only fetch SOL price in USD
+      const solPriceData = await this.getSolPrice();
       if (!solPriceData) {
         console.warn(`⚠️  No SOL price data available`);
         return null;
       }
-
       // Convert market cap from SOL to USD
       const marketCapInUsd = marketCapInSol * solPriceData.price;
-      
       console.log(`💱 Market cap calculation for ${tokenMint}:`);
       console.log(`   Market cap in SOL: ${marketCapInSol}`);
       console.log(`   SOL price: $${solPriceData.price.toFixed(2)} USD`);
-      console.log(`   Token price: $${priceData.price.toFixed(6)} USD`);
       console.log(`   Market cap in USD: $${marketCapInUsd.toFixed(2)} USD`);
-      
       return {
         marketCapUsd: marketCapInUsd,
-        tokenPrice: priceData.price,
         solPrice: solPriceData.price,
         marketCapSol: marketCapInSol,
-        timestamp: priceData.timestamp
+        timestamp: solPriceData.timestamp
       };
     } catch (error) {
       console.error(`❌ Error calculating market cap for ${tokenMint}:`, error.message);
