@@ -17,6 +17,8 @@ const child_process = require('child_process');
 const bs58 = require('bs58');
 const { Buffer } = require('buffer');
 const fetch = require('node-fetch');
+const { JupiterTokenService } = require('./src/services/jupiter/tokenService');
+const { JupiterSyncScheduler } = require('./src/services/jupiter/scheduler');
 
 // Debug logging for environment variables
 console.log('SUPABASE_URL:', process.env.SUPABASE_URL);
@@ -1208,6 +1210,19 @@ app.post('/api/test/create-token', async (req, res) => {
       throw error;
     }
 
+    // Cache the test token metadata for immediate use by swap prefill
+    try {
+      await setCachedTokenMetadata(mint, {
+        name,
+        symbol,
+        logo_uri: image || '',
+      });
+      console.log('[TEST-TOKEN-CREATION] Metadata cached for swap prefill, mint:', mint);
+    } catch (metadataError) {
+      console.warn('[TEST-TOKEN-CREATION] Failed to cache metadata for swap prefill:', metadataError);
+      // Don't fail the entire request if caching fails
+    }
+
     console.log('[TEST] Token saved to database successfully:', data);
 
     res.json({ 
@@ -1277,6 +1292,19 @@ app.post('/api/created-tokens', async (req, res) => {
     if (error) {
       console.error('Database insert error:', error);
       throw error;
+    }
+
+    // Cache the token metadata for immediate use by swap prefill
+    try {
+      await setCachedTokenMetadata(mint, {
+        name,
+        symbol,
+        logo_uri: image || '',
+      });
+      console.log('[TOKEN-CREATION] Metadata cached for swap prefill, mint:', mint);
+    } catch (metadataError) {
+      console.warn('[TOKEN-CREATION] Failed to cache metadata for swap prefill:', metadataError);
+      // Don't fail the entire request if caching fails
     }
 
     res.json({ 
@@ -2222,11 +2250,80 @@ try {
   console.warn('⚠️  Token price service not available:', error.message);
 }
 
+// --- Update token metadata endpoint ---
+app.put('/api/token/:mint/metadata', async (req, res) => {
+  try {
+    const { mint } = req.params;
+    const { name, symbol, image, decimals, description, launched_at, is_test } = req.body;
+    
+    if (!mint) return res.status(400).json({ error: 'Missing mint address' });
+    
+    // Update metadata in token_metadata table
+    const { data, error } = await supabase
+      .from('token_metadata')
+      .upsert({
+        mint,
+        name: name || null,
+        symbol: symbol || null,
+        image: image || null,
+        decimals: decimals || 9,
+        description: description || '',
+        launched_at: launched_at || null,
+        is_test: is_test || false,
+        last_updated: new Date().toISOString(),
+      }, {
+        onConflict: 'mint'
+      })
+      .select()
+      .single();
+    
+    if (error) {
+      console.error('[UPDATE-TOKEN-METADATA] Database error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    
+    res.json({
+      success: true,
+      metadata: data,
+      message: 'Token metadata updated successfully'
+    });
+  } catch (err) {
+    console.error('[UPDATE-TOKEN-METADATA] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- Get token metadata and price by mint (for real tokens) ---
 app.get('/api/token/:mint', async (req, res) => {
   try {
     const { mint } = req.params;
     if (!mint) return res.status(400).json({ error: 'Missing mint address' });
+
+    // Check if this is a test token first
+    const { data: testToken } = await supabase
+      .from('created_tokens')
+      .select('token_name, token_symbol, metadata')
+      .eq('mint_address', mint)
+      .eq('is_test', true)
+      .single();
+
+    if (testToken) {
+      // Return test token metadata from database
+      const meta = {
+        mint,
+        name: testToken.token_name,
+        symbol: testToken.token_symbol,
+        decimals: 9,
+        image: testToken.metadata?.imageFile || '',
+      };
+      
+      res.json({
+        ...meta,
+        usdPrice: null,
+        priceChange24h: null,
+      });
+      return;
+    }
 
     // Try cache/db first
     let meta = await getCachedTokenMetadata(mint);
@@ -2268,6 +2365,15 @@ app.get('/api/token/:mint', async (req, res) => {
 
       // Optionally cache in DB
       await setCachedTokenMetadata(mint, meta);
+    } else {
+      // Convert cached metadata to expected format for swap prefill
+      meta = {
+        mint: meta.mint,
+        name: meta.name,
+        symbol: meta.symbol,
+        decimals: 9, // Default for cached tokens
+        image: meta.logo_uri || meta.image || '', // Support both field names
+      };
     }
 
     // Fetch price from Moralis
@@ -2309,3 +2415,61 @@ app.listen(PORT, () => {
     }
   }
 });
+
+// Enhanced supported tickers endpoint
+app.get('/api/supported-tickers', async (req, res) => {
+  try {
+    const { includePrices = 'false', limit = 100 } = req.query;
+    let query = supabase
+      .from('supported_tickers')
+      .select('*')
+      .order('last_updated', { ascending: false })
+      .limit(parseInt(limit));
+    const { data: tokens, error } = await query;
+    if (error) throw error;
+
+    if (includePrices === 'true' && tokens.length > 0) {
+      const jupiterService = new JupiterTokenService();
+      const mintAddresses = tokens.map(t => t.mint_address);
+      const prices = await jupiterService.getTokenPrices(mintAddresses);
+      const enrichedTokens = tokens.map(token => ({
+        ...token,
+        jupiter_price: prices[token.mint_address]?.price || null,
+        price_24h_change: prices[token.mint_address]?.price_24h_change || null
+      }));
+      res.json({
+        tickers: enrichedTokens,
+        prices_included: true,
+        total: enrichedTokens.length
+      });
+    } else {
+      res.json({
+        tickers: tokens,
+        prices_included: false,
+        total: tokens.length
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Sync endpoint for admin use
+app.post('/api/supported-tickers/sync', async (req, res) => {
+  try {
+    const jupiterService = new JupiterTokenService();
+    const syncedTokens = await jupiterService.syncTokenList();
+    res.json({
+      success: true,
+      message: `Synced ${syncedTokens.length} tokens from Jupiter`,
+      synced_count: syncedTokens.length,
+      last_sync: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Start Jupiter sync scheduler
+const jupiterScheduler = new JupiterSyncScheduler();
+jupiterScheduler.start();
