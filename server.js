@@ -2222,6 +2222,78 @@ try {
   console.warn('⚠️  Token price service not available:', error.message);
 }
 
+// --- Get token metadata and price by mint (for real tokens) ---
+app.get('/api/token/:mint', async (req, res) => {
+  try {
+    const { mint } = req.params;
+    if (!mint) return res.status(400).json({ error: 'Missing mint address' });
+
+    // Try cache/db first
+    let meta = await getCachedTokenMetadata(mint);
+
+    if (!meta) {
+      // Fetch metadata from Helius
+      const heliusMetaResp = await axios.post(
+        `https://api.helius.xyz/v0/tokens/metadata?api-key=${process.env.HELIUS_API_KEY}`,
+        { mintAccounts: [mint] }
+      );
+      const heliusMeta = heliusMetaResp.data[0] || {};
+      console.log('[TOKEN-METADATA] Raw Helius response:', JSON.stringify(heliusMeta, null, 2));
+
+      // Robust image extraction (matches batch logic)
+      let image =
+        heliusMeta.offChainData?.image ||
+        heliusMeta.legacyMetadata?.logoURI ||
+        (heliusMeta.onChainData?.data?.uri ? resolveIpfsUrl(heliusMeta.onChainData.data.uri) : '');
+
+      // If image is a JSON metadata file (ends with .json), fetch and parse for actual image
+      if (image && image.endsWith('.json')) {
+        try {
+          const metaResp = await axios.get(image);
+          if (metaResp.data && metaResp.data.image) {
+            image = resolveIpfsUrl(metaResp.data.image);
+          }
+        } catch (e) {
+          console.warn('[TOKEN-METADATA] Could not fetch nested metadata for image:', image, e.message);
+        }
+      }
+
+      meta = {
+        mint,
+        name: heliusMeta.offChainData?.name || heliusMeta.legacyMetadata?.name || heliusMeta.onChainData?.data?.name || 'Unknown Token',
+        symbol: heliusMeta.offChainData?.symbol || heliusMeta.legacyMetadata?.symbol || heliusMeta.onChainData?.data?.symbol || mint.slice(0, 4),
+        decimals: heliusMeta.decimals || 9,
+        image, // Always use 'image' field
+      };
+
+      // Optionally cache in DB
+      await setCachedTokenMetadata(mint, meta);
+    }
+
+    // Fetch price from Moralis
+    let usdPrice = null, priceChange24h = null;
+    try {
+      const priceResp = await axios.get(
+        `https://solana-gateway.moralis.io/token/mainnet/${mint}/price`,
+        { headers: { 'X-API-Key': process.env.MORALIS_API_KEY } }
+      );
+      usdPrice = priceResp.data?.usdPrice ?? null;
+      priceChange24h = priceResp.data?.usdPrice24hrPercentChange ?? null;
+    } catch (e) {
+      console.warn('[TOKEN-METADATA] Could not fetch price from Moralis:', e.message);
+    }
+
+    res.json({
+      ...meta,
+      usdPrice,
+      priceChange24h,
+    });
+  } catch (err) {
+    console.error('[TOKEN-METADATA] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Server is running on http://localhost:${PORT}`);
   console.log('📊 Market Cap Scheduler Status:', marketCapScheduler ? 'Available' : 'Not Available');
