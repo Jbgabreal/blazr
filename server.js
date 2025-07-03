@@ -100,37 +100,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-// --- Supabase Caching Helpers ---
-const CACHE_TTL_MS = 1 * 60 * 1000; // 1 minute
-
-async function getCachedTokenMetadata(mint) {
-  try {
-    const { data, error } = await supabase
-      .from('token_metadata')
-      .select('*')
-      .eq('mint', mint)
-      .single();
-    if (error || !data) return null;
-    if (data.last_updated && Date.now() - new Date(data.last_updated).getTime() < CACHE_TTL_MS) {
-      return data;
-    }
-    return null;
-  } catch (e) {
-    return null;
-  }
-}
-
-async function setCachedTokenMetadata(mint, meta) {
-  try {
-    await supabase.from('token_metadata').upsert({
-      mint,
-      name: meta.name,
-      symbol: meta.symbol,
-      logo_uri: meta.logo_uri,
-      last_updated: new Date().toISOString(),
-    });
-  } catch (e) {}
-}
+// --- Supabase Caching Helpers (Removed token metadata caching) ---
 
 async function getCachedTokenBalance(publicKey, mint) {
   try {
@@ -226,36 +196,7 @@ async function cacheTokenPrices(priceData) {
   }
 }
 
-// Add wallet balance cache constants
-const WALLET_CACHE_TTL_MS = 1 * 60 * 1000; // 1 minute cache
-
-// Add wallet balance caching functions
-async function getCachedWalletTokens(owner) {
-  try {
-    const { data, error } = await supabase
-      .from('wallet_tokens')
-      .select('*')
-      .eq('owner', owner)
-      .single();
-    if (error || !data) return null;
-    if (data.last_updated && Date.now() - new Date(data.last_updated).getTime() < WALLET_CACHE_TTL_MS) {
-      return JSON.parse(data.tokens_json);
-    }
-    return null;
-  } catch (e) {
-    return null;
-  }
-}
-
-async function setCachedWalletTokens(owner, tokens) {
-  try {
-    await supabase.from('wallet_tokens').upsert({
-      owner,
-      tokens_json: JSON.stringify(tokens),
-      last_updated: new Date().toISOString(),
-    });
-  } catch (e) {}
-}
+// Wallet token caching removed - always fetch fresh data
 
 // --- Token Generation Endpoint ---
 app.post('/api/generate-token-data', async (req, res) => {
@@ -681,11 +622,8 @@ app.post('/api/rpc/token-accounts', async (req, res) => {
     if (!owner) {
       return res.status(400).json({ error: 'Owner public key is required' });
     }
-    // Check wallet cache first
-    const cachedTokens = await getCachedWalletTokens(owner);
-    if (cachedTokens) {
-      return res.json({ tokens: cachedTokens });
-    }
+    
+    // Always fetch fresh data (no caching)
     const tokenAccountsResponse = await axios.post(
       `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`,
       {
@@ -822,7 +760,7 @@ app.post('/api/rpc/token-accounts', async (req, res) => {
     };
     const allTokens = [solToken, ...Object.values(tokens)];
 
-    await setCachedWalletTokens(owner, allTokens);
+    // No caching - return fresh data
     res.json({ tokens: allTokens });
   } catch (error) {
     console.error('Token accounts fetch error:', error);
@@ -1210,18 +1148,8 @@ app.post('/api/test/create-token', async (req, res) => {
       throw error;
     }
 
-    // Cache the test token metadata for immediate use by swap prefill
-    try {
-      await setCachedTokenMetadata(mint, {
-        name,
-        symbol,
-        logo_uri: image || '',
-      });
-      console.log('[TEST-TOKEN-CREATION] Metadata cached for swap prefill, mint:', mint);
-    } catch (metadataError) {
-      console.warn('[TEST-TOKEN-CREATION] Failed to cache metadata for swap prefill:', metadataError);
-      // Don't fail the entire request if caching fails
-    }
+    // No caching - always fetch live data
+    console.log('[TEST-TOKEN-CREATION] Token created, mint:', mint);
 
     console.log('[TEST] Token saved to database successfully:', data);
 
@@ -1294,18 +1222,8 @@ app.post('/api/created-tokens', async (req, res) => {
       throw error;
     }
 
-    // Cache the token metadata for immediate use by swap prefill
-    try {
-      await setCachedTokenMetadata(mint, {
-        name,
-        symbol,
-        logo_uri: image || '',
-      });
-      console.log('[TOKEN-CREATION] Metadata cached for swap prefill, mint:', mint);
-    } catch (metadataError) {
-      console.warn('[TOKEN-CREATION] Failed to cache metadata for swap prefill:', metadataError);
-      // Don't fail the entire request if caching fails
-    }
+    // No caching - always fetch live data
+    console.log('[TOKEN-CREATION] Token created, mint:', mint);
 
     res.json({ 
       success: true, 
@@ -2325,56 +2243,39 @@ app.get('/api/token/:mint', async (req, res) => {
       return;
     }
 
-    // Try cache/db first
-    let meta = await getCachedTokenMetadata(mint);
+    // Always fetch live metadata from Helius (no caching)
+    const heliusMetaResp = await axios.post(
+      `https://api.helius.xyz/v0/tokens/metadata?api-key=${process.env.HELIUS_API_KEY}`,
+      { mintAccounts: [mint] }
+    );
+    const heliusMeta = heliusMetaResp.data[0] || {};
+    console.log('[TOKEN-METADATA] Raw Helius response:', JSON.stringify(heliusMeta, null, 2));
 
-    if (!meta) {
-      // Fetch metadata from Helius
-      const heliusMetaResp = await axios.post(
-        `https://api.helius.xyz/v0/tokens/metadata?api-key=${process.env.HELIUS_API_KEY}`,
-        { mintAccounts: [mint] }
-      );
-      const heliusMeta = heliusMetaResp.data[0] || {};
-      console.log('[TOKEN-METADATA] Raw Helius response:', JSON.stringify(heliusMeta, null, 2));
+    // Robust image extraction (matches batch logic)
+    let image =
+      heliusMeta.offChainData?.image ||
+      heliusMeta.legacyMetadata?.logoURI ||
+      (heliusMeta.onChainData?.data?.uri ? resolveIpfsUrl(heliusMeta.onChainData.data.uri) : '');
 
-      // Robust image extraction (matches batch logic)
-      let image =
-        heliusMeta.offChainData?.image ||
-        heliusMeta.legacyMetadata?.logoURI ||
-        (heliusMeta.onChainData?.data?.uri ? resolveIpfsUrl(heliusMeta.onChainData.data.uri) : '');
-
-      // If image is a JSON metadata file (ends with .json), fetch and parse for actual image
-      if (image && image.endsWith('.json')) {
-        try {
-          const metaResp = await axios.get(image);
-          if (metaResp.data && metaResp.data.image) {
-            image = resolveIpfsUrl(metaResp.data.image);
-          }
-        } catch (e) {
-          console.warn('[TOKEN-METADATA] Could not fetch nested metadata for image:', image, e.message);
+    // If image is a JSON metadata file (ends with .json), fetch and parse for actual image
+    if (image && image.endsWith('.json')) {
+      try {
+        const metaResp = await axios.get(image);
+        if (metaResp.data && metaResp.data.image) {
+          image = resolveIpfsUrl(metaResp.data.image);
         }
+      } catch (e) {
+        console.warn('[TOKEN-METADATA] Could not fetch nested metadata for image:', image, e.message);
       }
-
-      meta = {
-        mint,
-        name: heliusMeta.offChainData?.name || heliusMeta.legacyMetadata?.name || heliusMeta.onChainData?.data?.name || 'Unknown Token',
-        symbol: heliusMeta.offChainData?.symbol || heliusMeta.legacyMetadata?.symbol || heliusMeta.onChainData?.data?.symbol || mint.slice(0, 4),
-        decimals: heliusMeta.decimals || 9,
-        image, // Always use 'image' field
-      };
-
-      // Optionally cache in DB
-      await setCachedTokenMetadata(mint, meta);
-    } else {
-      // Convert cached metadata to expected format for swap prefill
-      meta = {
-        mint: meta.mint,
-        name: meta.name,
-        symbol: meta.symbol,
-        decimals: 9, // Default for cached tokens
-        image: meta.logo_uri || meta.image || '', // Support both field names
-      };
     }
+
+    const meta = {
+      mint,
+      name: heliusMeta.offChainData?.name || heliusMeta.legacyMetadata?.name || heliusMeta.onChainData?.data?.name || 'Unknown Token',
+      symbol: heliusMeta.offChainData?.symbol || heliusMeta.legacyMetadata?.symbol || heliusMeta.onChainData?.data?.symbol || mint.slice(0, 4),
+      decimals: heliusMeta.decimals || 9,
+      image, // Always use 'image' field
+    };
 
     // Fetch price from Moralis
     let usdPrice = null, priceChange24h = null;
