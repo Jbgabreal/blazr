@@ -280,16 +280,16 @@ async function updateTokenMarketCap(tokenId, tokenAddress) {
     const shouldUpdate = dataSource === 'real-time' || (dataSource === 'none' && marketCapSol === 0);
     
     if (shouldUpdate) {
-      const { error } = await supabase
-        .from('created_tokens')
-        .update({
-          market_cap: marketCapResult.marketCapUsd, // Store USD value in database
-          last_market_cap_update: new Date().toISOString()
-        })
-        .eq('id', tokenId);
+    const { error } = await supabase
+      .from('created_tokens')
+      .update({
+        market_cap: marketCapResult.marketCapUsd, // Store USD value in database
+        last_market_cap_update: new Date().toISOString()
+      })
+      .eq('id', tokenId);
 
-      if (error) {
-        throw error;
+    if (error) {
+      throw error;
       }
     } else {
       console.log(`📋 Skipping database update for ${tokenAddress} (using cached value)`);

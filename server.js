@@ -1538,18 +1538,7 @@ app.get('/api/test-token/:mint/metadata', async (req, res) => {
 });
 
 // --- Supported Tickers API ---
-// Get all supported tickers
-app.get('/api/supported-tickers', async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('supported_tickers')
-      .select('*');
-    if (error) return res.status(500).json({ error: error.message });
-    res.json({ tickers: data });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+
 
 // Add or update one or more supported tickers (accepts single object or array)
 app.post('/api/supported-tickers', async (req, res) => {
@@ -2320,7 +2309,7 @@ app.listen(PORT, () => {
 // Enhanced supported tickers endpoint
 app.get('/api/supported-tickers', async (req, res) => {
   try {
-    const { includePrices = 'false', limit = 100 } = req.query;
+    const { includePrices = 'false', limit = 1000 } = req.query;
     let query = supabase
       .from('supported_tickers')
       .select('*')
