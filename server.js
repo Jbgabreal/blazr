@@ -799,10 +799,10 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
         const formData = new FormData();
         formData.append('name', tokenMetadata.name);
         formData.append('symbol', tokenMetadata.symbol);
-        // Append ' powered by Blazr' to the description if not already present
+        // Append 'powered by Blazr' on a new line after the user's description, only if not already present
         let description = tokenMetadata.description || '';
         if (!description.toLowerCase().includes('powered by blazr')) {
-          description = description.trim() + ' powered by Blazr';
+          description = description.trim() + '\n\npowered by Blazr';
         }
         formData.append('description', description);
         formData.append('twitter', tokenMetadata.twitter || '');
