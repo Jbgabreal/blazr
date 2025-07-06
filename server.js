@@ -970,6 +970,8 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
     if (!signature) {
       throw lastError || new Error('Failed to send transaction');
     }
+    const now = new Date().toISOString();
+    console.log(`[launchtimer][backend] About to send response for /api/trade-local at ${now}`);
     res.json({ status: 'pending', signature, timing, usedBackupRpc });
   } catch (error) {
     console.error('Trade error in /api/trade-local:', error.message, error);
