@@ -799,7 +799,12 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
         const formData = new FormData();
         formData.append('name', tokenMetadata.name);
         formData.append('symbol', tokenMetadata.symbol);
-        formData.append('description', tokenMetadata.description || '');
+        // Append ' powered by Blazr' to the description if not already present
+        let description = tokenMetadata.description || '';
+        if (!description.toLowerCase().includes('powered by blazr')) {
+          description = description.trim() + ' powered by Blazr';
+        }
+        formData.append('description', description);
         formData.append('twitter', tokenMetadata.twitter || '');
         formData.append('showName', 'true');
         
@@ -900,28 +905,20 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
           if (!secretKey || secretKey.length === 0) {
             throw new Error('User wallet secretKey is required in the request body');
           }
-          
           const userKeypair = Keypair.fromSecretKey(Uint8Array.from(secretKey));
-          
-          // For token creation, mintSecretKey is required
           if (req.body.action === 'create') {
             if (!mintSecretKey || mintSecretKey.length === 0) {
               throw new Error('Mint secretKey is required for token creation');
             }
             const mintKeypair = Keypair.fromSecretKey(Uint8Array.from(mintSecretKey));
-            
-            // Always ensure a fresh blockhash before each send attempt
             const { blockhash } = await connection.getLatestBlockhash('finalized');
             tx.message.recentBlockhash = blockhash;
             tx.sign([mintKeypair, userKeypair]);
           } else {
-            // For swaps (buy/sell), only user keypair is needed
-            // Always ensure a fresh blockhash before each send attempt
             const { blockhash } = await connection.getLatestBlockhash('finalized');
             tx.message.recentBlockhash = blockhash;
             tx.sign([userKeypair]);
           }
-          
           console.log(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Signed transaction, sending...`);
           signature = await connection.sendTransaction(tx, {
             maxRetries: 3,
@@ -930,41 +927,22 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
           });
           sendTiming = Date.now() - sendStart;
           console.log(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Transaction sent, signature:`, signature);
-
-          // Poll for 'processed' status with exponential backoff
-          let processed = false;
-          for (let i = 0; i < maxPolls; i++) {
-            const status = await connection.getSignatureStatus(signature);
-            if (status && status.value && status.value.confirmationStatus === 'processed') {
-              processed = true;
-              break;
-            }
-            const wait = basePollInterval * Math.pow(1.5, attempt); // Exponential backoff per attempt
-            await new Promise(res => setTimeout(res, wait));
-          }
-          if (!processed) {
-            throw new Error(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Transaction not propagated to the network (not processed after ${maxPolls * basePollInterval / 1000}s)`);
-          }
-          console.log(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Transaction is processed on the network:`, signature);
           usedBackupRpc = rpcIdx === 1;
           break; // Success
         } catch (err) {
           lastError = err;
           console.error(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Error sending transaction:`, err);
-          // If not last RPC, try next one
           if (rpcIdx < rpcUrls.length - 1) {
             continue;
           }
-          // If blockhash error, try next attempt (new blockhash)
           if (err.message && err.message.includes('block height exceeded')) {
             continue;
           }
-          break; // Other errors, do not retry
+          break;
         }
       }
       if (signature) break;
     }
-
     timing.sendTransaction = sendTiming;
     timing.total = Date.now() - start;
     if (!signature) {
@@ -972,7 +950,33 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
     }
     const now = new Date().toISOString();
     console.log(`[launchtimer][backend] About to send response for /api/trade-local at ${now}`);
+    // Respond immediately after sending transaction, do not wait for confirmation polling
     res.json({ status: 'pending', signature, timing, usedBackupRpc });
+    // --- Polling for confirmation removed for speed. If needed, move to background or provide a status endpoint. ---
+
+    // --- Background confirmation and status update logic ---
+    const POLL_ATTEMPTS = 15;
+    const POLL_INTERVAL = 2000; // ms
+    (async function confirmTxInBackground() {
+      let confirmed = false;
+      for (let i = 0; i < POLL_ATTEMPTS; i++) {
+        try {
+          const statusObj = await connection.getSignatureStatus(signature);
+          if (statusObj && statusObj.value && statusObj.value.confirmationStatus === 'confirmed') {
+            confirmed = true;
+            break;
+          }
+        } catch (e) {
+          // log or ignore
+        }
+        await new Promise(res => setTimeout(res, POLL_INTERVAL));
+      }
+      // Update DB status
+      await supabase
+        .from('created_tokens')
+        .update({ status: confirmed ? 'confirmed' : 'failed' })
+        .eq('mint_address', req.body.mint);
+    })();
   } catch (error) {
     console.error('Trade error in /api/trade-local:', error.message, error);
     let status = 500;
@@ -1223,7 +1227,8 @@ app.post('/api/created-tokens', async (req, res) => {
         user_public_key: publicKey,
         created_at: launchedAt ? new Date(launchedAt).toISOString() : new Date().toISOString(),
         tx_signature: txSignature || null,
-        is_test: false
+        is_test: false,
+        status: 'pending'
       })
       .select()
       .single();
