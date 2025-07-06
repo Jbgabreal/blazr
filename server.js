@@ -854,9 +854,9 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
       };
     }
 
-    const pumpStart = Date.now();
+    const pumpPortalStart = Date.now();
     console.log('Sending request to Pump Portal:', requestBodyForPumpPortal);
-    console.time('[PumpPortal] API Call');
+    console.time('[launchtimer][backend] Pump Portal API Call');
     const pumpPortalResponse = await axios.post('https://pumpportal.fun/api/trade-local', requestBodyForPumpPortal, {
       timeout: 60000,
       headers: {
@@ -866,8 +866,12 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
       },
       responseType: 'arraybuffer'
     });
-    console.timeEnd('[PumpPortal] API Call');
-    timing.pumpPortal = Date.now() - pumpStart;
+    console.timeEnd('[launchtimer][backend] Pump Portal API Call');
+    const pumpPortalDuration = Date.now() - pumpPortalStart;
+    if (pumpPortalDuration > 2000) {
+      console.warn(`[launchtimer][backend] BLOCKER: Pump Portal API Call took ${pumpPortalDuration}ms`);
+    }
+    timing.pumpPortal = Date.now() - pumpPortalStart;
     console.log('Received response from Pump Portal');
 
     const responseDataBuffer = Buffer.from(pumpPortalResponse.data);
@@ -1173,7 +1177,8 @@ app.post('/api/test/create-token', async (req, res) => {
 
 // --- Endpoint to CREATE a new token (for token launch) ---
 app.post('/api/created-tokens', async (req, res) => {
-  console.time('[API] /api/created-tokens');
+  console.log('[launchtimer][backend] /api/created-tokens request received');
+  console.time('[launchtimer][backend] DB Save');
   try {
     const { 
       mint, 
@@ -1190,7 +1195,7 @@ app.post('/api/created-tokens', async (req, res) => {
     } = req.body;
 
     if (!mint || !name || !symbol || !publicKey) {
-      console.timeEnd('[API] /api/created-tokens');
+      console.timeEnd('[launchtimer][backend] DB Save');
       return res.status(400).json({ 
         error: 'Missing required fields',
         required: ['mint', 'name', 'symbol', 'publicKey']
@@ -1223,14 +1228,15 @@ app.post('/api/created-tokens', async (req, res) => {
 
     if (error) {
       console.error('Database insert error:', error);
-      console.timeEnd('[API] /api/created-tokens');
+      console.timeEnd('[launchtimer][backend] DB Save');
       throw error;
     }
 
     // No caching - always fetch live data
     console.log('[TOKEN-CREATION] Token created, mint:', mint);
 
-    console.timeEnd('[API] /api/created-tokens');
+    console.timeEnd('[launchtimer][backend] DB Save');
+    console.log('[launchtimer][backend] /api/created-tokens response sent');
     res.json({ 
       success: true, 
       token: data,
@@ -1238,7 +1244,7 @@ app.post('/api/created-tokens', async (req, res) => {
     });
   } catch (err) {
     console.error('Create token error:', err);
-    console.timeEnd('[API] /api/created-tokens');
+    console.timeEnd('[launchtimer][backend] DB Save');
     res.status(500).json({ 
       error: 'Failed to create token',
       details: err.message 
