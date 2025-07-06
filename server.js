@@ -856,6 +856,7 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
 
     const pumpStart = Date.now();
     console.log('Sending request to Pump Portal:', requestBodyForPumpPortal);
+    console.time('[PumpPortal] API Call');
     const pumpPortalResponse = await axios.post('https://pumpportal.fun/api/trade-local', requestBodyForPumpPortal, {
       timeout: 60000,
       headers: {
@@ -865,6 +866,7 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
       },
       responseType: 'arraybuffer'
     });
+    console.timeEnd('[PumpPortal] API Call');
     timing.pumpPortal = Date.now() - pumpStart;
     console.log('Received response from Pump Portal');
 
@@ -1171,6 +1173,7 @@ app.post('/api/test/create-token', async (req, res) => {
 
 // --- Endpoint to CREATE a new token (for token launch) ---
 app.post('/api/created-tokens', async (req, res) => {
+  console.time('[API] /api/created-tokens');
   try {
     const { 
       mint, 
@@ -1187,6 +1190,7 @@ app.post('/api/created-tokens', async (req, res) => {
     } = req.body;
 
     if (!mint || !name || !symbol || !publicKey) {
+      console.timeEnd('[API] /api/created-tokens');
       return res.status(400).json({ 
         error: 'Missing required fields',
         required: ['mint', 'name', 'symbol', 'publicKey']
@@ -1219,12 +1223,14 @@ app.post('/api/created-tokens', async (req, res) => {
 
     if (error) {
       console.error('Database insert error:', error);
+      console.timeEnd('[API] /api/created-tokens');
       throw error;
     }
 
     // No caching - always fetch live data
     console.log('[TOKEN-CREATION] Token created, mint:', mint);
 
+    console.timeEnd('[API] /api/created-tokens');
     res.json({ 
       success: true, 
       token: data,
@@ -1232,6 +1238,7 @@ app.post('/api/created-tokens', async (req, res) => {
     });
   } catch (err) {
     console.error('Create token error:', err);
+    console.timeEnd('[API] /api/created-tokens');
     res.status(500).json({ 
       error: 'Failed to create token',
       details: err.message 
