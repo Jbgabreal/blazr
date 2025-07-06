@@ -879,8 +879,8 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
     timing.pumpPortal = Date.now() - pumpPortalStart;
     console.log('Received response from Pump Portal');
 
-    // Log the raw response from Pump Portal for debugging
-    console.log('Pump Portal raw response:', Buffer.from(pumpPortalResponse.data).toString());
+    // Log the raw HTTP response from PumpPortal for debugging
+    console.log('[PumpPortal][trade-local] Raw HTTP response:', Buffer.from(pumpPortalResponse.data).toString());
 
     // Check for error in Pump Portal response (user-friendly)
     let pumpPortalData;
