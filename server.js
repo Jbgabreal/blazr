@@ -773,10 +773,52 @@ app.post('/api/rpc/token-accounts', async (req, res) => {
 
 // --- Endpoint for trade-local ---
 app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
-  const start = Date.now();
-  const timing = {};
-
   try {
+    const { publicKey, amount } = req.body;
+    // Validate publicKey
+    let userPubkey;
+    try {
+      if (!publicKey) throw new Error('Missing publicKey');
+      const solanaWeb3 = require('@solana/web3.js');
+      userPubkey = new solanaWeb3.PublicKey(publicKey);
+    } catch (e) {
+      return res.status(400).json({
+        error: 'Invalid or missing publicKey in request.',
+        errorCode: 'INVALID_PUBLIC_KEY'
+      });
+    }
+    // 1. Fetch user's SOL balance
+    const solanaWeb3 = require('@solana/web3.js');
+    const connection = new solanaWeb3.Connection(process.env.SWAP_SOLANA_RPC_URL, 'confirmed');
+    const balanceLamports = await connection.getBalance(userPubkey);
+    const solBalance = balanceLamports / solanaWeb3.LAMPORTS_PER_SOL;
+    // 2. Fetch current SOL/USD price from CoinGecko
+    const axios = require('axios');
+    let solPrice = 0;
+    try {
+      const priceResp = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
+      solPrice = priceResp.data.solana.usd;
+    } catch (e) {
+      console.error('[BalanceCheck] Failed to fetch SOL price from CoinGecko:', e.message);
+      return res.status(503).json({
+        error: 'Failed to fetch SOL price. Please try again later.',
+        errorCode: 'SOL_PRICE_UNAVAILABLE'
+      });
+    }
+    // 3. Calculate minimum required SOL
+    const minSol = 4 / solPrice;
+    const inputAmount = Number(amount) || 0;
+    const requiredSol = inputAmount > 0 ? inputAmount + minSol : minSol;
+    // 4. Check if user has enough SOL
+    if (solBalance <= requiredSol) {
+      return res.status(400).json({
+        error: `Insufficient SOL balance. You need at least ${(requiredSol).toFixed(4)} SOL (including your buy amount and $4 for fees) to create a token. Your balance: ${solBalance.toFixed(4)} SOL`,
+        errorCode: 'INSUFFICIENT_BALANCE',
+        requiredSol: requiredSol,
+        solBalance: solBalance,
+        solPrice: solPrice
+      });
+    }
     // Validate required fields
     if (!req.body.publicKey) {
       throw new Error('Public key is required');
@@ -862,15 +904,33 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
     const pumpPortalStart = Date.now();
     console.log('Sending request to Pump Portal:', requestBodyForPumpPortal);
     console.time('[launchtimer][backend] Pump Portal API Call');
-    const pumpPortalResponse = await axios.post('https://pumpportal.fun/api/trade-local', requestBodyForPumpPortal, {
-      timeout: 60000,
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-      },
-      responseType: 'arraybuffer'
-    });
+    console.log('🚨 About to POST to PumpPortal in /api/trade-local:', JSON.stringify(requestBodyForPumpPortal));
+    let pumpPortalResponse;
+    try {
+      pumpPortalResponse = await axios.post('https://pumpportal.fun/api/trade-local', requestBodyForPumpPortal, {
+        timeout: 60000,
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        },
+        responseType: 'arraybuffer'
+      });
+
+    } catch (err) {
+      console.error('🚨 PumpPortal axios.post error:', {
+        message: err.message,
+        status: err.response?.status,
+        statusText: err.response?.statusText,
+        data: err.response?.data,
+        config: {
+          url: err.config?.url,
+          method: err.config?.method,
+          timeout: err.config?.timeout
+        }
+      });
+      throw err;
+    }
     console.timeEnd('[launchtimer][backend] Pump Portal API Call');
     const pumpPortalDuration = Date.now() - pumpPortalStart;
     if (pumpPortalDuration > 2000) {
@@ -879,8 +939,24 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
     timing.pumpPortal = Date.now() - pumpPortalStart;
     console.log('Received response from Pump Portal');
 
-    // Log the raw HTTP response from PumpPortal for debugging
-    console.log('[PumpPortal][trade-local] Raw HTTP response:', Buffer.from(pumpPortalResponse.data).toString());
+    // Log the response info from PumpPortal for debugging
+    console.log('[PumpPortal][trade-local] Response info:', {
+      status: pumpPortalResponse.status,
+      statusText: pumpPortalResponse.statusText,
+      headers: pumpPortalResponse.headers,
+      dataLength: pumpPortalResponse.data.length,
+      dataType: typeof pumpPortalResponse.data,
+      isBuffer: Buffer.isBuffer(pumpPortalResponse.data),
+      isArrayBuffer: pumpPortalResponse.data instanceof ArrayBuffer
+    });
+    
+    // Only log a small preview of binary data to avoid spam
+    if (Buffer.isBuffer(pumpPortalResponse.data) || pumpPortalResponse.data instanceof ArrayBuffer) {
+      const preview = Buffer.from(pumpPortalResponse.data).toString('hex').substring(0, 100);
+      console.log('[PumpPortal][trade-local] Binary data preview (first 50 bytes):', preview + '...');
+    } else {
+      console.log('[PumpPortal][trade-local] Response data:', pumpPortalResponse.data);
+    }
 
     // Check for error in Pump Portal response (user-friendly)
     let pumpPortalData;
@@ -888,20 +964,54 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
       pumpPortalData = JSON.parse(Buffer.from(pumpPortalResponse.data).toString());
     } catch (e) {
       // If not JSON, ignore (could be binary tx)
+      console.log('[PumpPortal] Response is not JSON (likely binary transaction data)');
     }
+    
     if (pumpPortalData && pumpPortalData.error) {
+      console.error('[PumpPortal] Error response:', pumpPortalData);
+      
       let userMessage = 'An error occurred while launching your token.';
-      if (pumpPortalData.error.toLowerCase().includes('insufficient')) {
-        userMessage = 'Insufficient balance to launch this token.';
-      } else if (pumpPortalData.error.toLowerCase().includes('already exists')) {
-        userMessage = 'A token with this mint already exists.';
+      let errorCode = 'UNKNOWN_ERROR';
+      
+      const errorText = pumpPortalData.error.toString().toLowerCase();
+      
+      if (errorText.includes('insufficient') || errorText.includes('balance')) {
+        userMessage = 'Insufficient SOL balance to launch this token. Please ensure you have enough SOL for the transaction fee and any initial buy amount.';
+        errorCode = 'INSUFFICIENT_BALANCE';
+      } else if (errorText.includes('already exists') || errorText.includes('duplicate')) {
+        userMessage = 'A token with this mint address already exists. Please try again with a different mint.';
+        errorCode = 'TOKEN_ALREADY_EXISTS';
+      } else if (errorText.includes('invalid') || errorText.includes('invalid mint')) {
+        userMessage = 'Invalid mint address provided. Please check your token configuration.';
+        errorCode = 'INVALID_MINT';
+      } else if (errorText.includes('rate limit') || errorText.includes('too many requests')) {
+        userMessage = 'Too many requests. Please wait a moment and try again.';
+        errorCode = 'RATE_LIMITED';
+      } else if (errorText.includes('network') || errorText.includes('connection')) {
+        userMessage = 'Network error occurred. Please check your connection and try again.';
+        errorCode = 'NETWORK_ERROR';
+      } else if (errorText.includes('timeout')) {
+        userMessage = 'Request timed out. Please try again.';
+        errorCode = 'TIMEOUT';
       }
-      return res.status(400).json({ error: userMessage });
+      
+      console.error(`[PumpPortal] User-friendly error: ${userMessage} (Code: ${errorCode})`);
+      
+      return res.status(400).json({ 
+        error: userMessage,
+        errorCode: errorCode,
+        originalError: pumpPortalData.error,
+        details: pumpPortalData.details || null
+      });
     }
 
     const responseDataBuffer = Buffer.from(pumpPortalResponse.data);
     const txBase64 = responseDataBuffer.toString('base64');
-    console.log('Serialized transaction (base64):', txBase64);
+    console.log('[PumpPortal] Transaction data:', {
+      bufferSize: responseDataBuffer.length,
+      base64Length: txBase64.length,
+      base64Preview: txBase64.substring(0, 100) + '...'
+    });
 
     // Advanced retry logic
     const rpcUrls = [process.env.SWAP_SOLANA_RPC_URL, process.env.SWAP2_SOLANA_RPC_URL].filter(Boolean);
@@ -970,32 +1080,112 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
     }
     const now = new Date().toISOString();
     console.log(`[launchtimer][backend] About to send response for /api/trade-local at ${now}`);
+    
     // Respond immediately after sending transaction, do not wait for confirmation polling
     res.json({ status: 'pending', signature, timing, usedBackupRpc });
-    // --- Polling for confirmation removed for speed. If needed, move to background or provide a status endpoint. ---
-
+    
     // --- Background confirmation and status update logic ---
     const POLL_ATTEMPTS = 15;
     const POLL_INTERVAL = 2000; // ms
     (async function confirmTxInBackground() {
       let confirmed = false;
+      let errorDetails = null;
+      console.log(`[TX-CONFIRMATION] Starting confirmation polling for signature: ${signature}`);
+      console.log(`[TX-CONFIRMATION] Mint address: ${req.body.mint}`);
+      
+      // Create a new connection for background confirmation
+      const rpcUrls = [process.env.SWAP_SOLANA_RPC_URL, process.env.SWAP2_SOLANA_RPC_URL].filter(Boolean);
+      console.log(`[TX-CONFIRMATION] Available RPC URLs:`, rpcUrls);
+      let backgroundConnection = null;
+      
+      for (const rpcUrl of rpcUrls) {
+        try {
+          backgroundConnection = new Connection(rpcUrl, 'confirmed');
+          console.log(`[TX-CONFIRMATION] Successfully created connection with RPC: ${rpcUrl}`);
+          break;
+        } catch (e) {
+          console.warn(`[TX-CONFIRMATION] Failed to create connection with RPC ${rpcUrl}:`, e.message);
+          continue;
+        }
+      }
+      
+      if (!backgroundConnection) {
+        console.error(`[TX-CONFIRMATION] Failed to create connection for background confirmation`);
+        // Still try to update database with failed status
+        try {
+          await supabase
+            .from('created_tokens')
+            .update({ 
+              status: 'failed',
+              confirmed_at: null
+            })
+            .eq('mint_address', req.body.mint);
+          console.log(`[TX-CONFIRMATION] Database updated for mint ${req.body.mint}: status = failed (connection error)`);
+        } catch (dbError) {
+          console.error(`[TX-CONFIRMATION] Failed to update database after connection error:`, dbError);
+        }
+        return;
+      }
+      
       for (let i = 0; i < POLL_ATTEMPTS; i++) {
         try {
-          const statusObj = await connection.getSignatureStatus(signature);
-          if (statusObj && statusObj.value && statusObj.value.confirmationStatus === 'confirmed') {
-            confirmed = true;
-            break;
+          const statusObj = await backgroundConnection.getSignatureStatus(signature);
+          console.log(`[TX-CONFIRMATION] Attempt ${i + 1}/${POLL_ATTEMPTS}:`, {
+            signature: signature,
+            status: statusObj?.value?.confirmationStatus,
+            err: statusObj?.value?.err,
+            slot: statusObj?.context?.slot,
+            hasValue: !!statusObj?.value
+          });
+          
+          if (statusObj && statusObj.value) {
+            if (statusObj.value.err) {
+              errorDetails = statusObj.value.err;
+              console.error(`[TX-CONFIRMATION] Transaction failed with error:`, errorDetails);
+              break;
+            }
+            if (statusObj.value.confirmationStatus === 'confirmed') {
+              confirmed = true;
+              console.log(`[TX-CONFIRMATION] ✅ Transaction confirmed successfully!`);
+              break;
+            }
+          } else {
+            console.log(`[TX-CONFIRMATION] No status value yet, continuing...`);
           }
         } catch (e) {
-          // log or ignore
+          console.warn(`[TX-CONFIRMATION] Error checking status (attempt ${i + 1}):`, e.message);
         }
         await new Promise(res => setTimeout(res, POLL_INTERVAL));
       }
+      
+      const finalStatus = confirmed ? 'confirmed' : 'failed';
+      console.log(`[TX-CONFIRMATION] Final status for ${signature}: ${finalStatus}${errorDetails ? ` (Error: ${JSON.stringify(errorDetails)})` : ''}`);
+      
       // Update DB status
-      await supabase
-        .from('created_tokens')
-        .update({ status: confirmed ? 'confirmed' : 'failed' })
-        .eq('mint_address', req.body.mint);
+      try {
+        console.log(`[TX-CONFIRMATION] Attempting to update database for mint: ${req.body.mint}`);
+        const updateResult = await supabase
+          .from('created_tokens')
+          .update({ 
+            status: finalStatus,
+            confirmed_at: confirmed ? new Date().toISOString() : null
+          })
+          .eq('mint_address', req.body.mint);
+        
+        if (updateResult.error) {
+          console.error(`[TX-CONFIRMATION] Database update error:`, updateResult.error);
+        } else {
+          console.log(`[TX-CONFIRMATION] Database updated successfully for mint ${req.body.mint}: status = ${finalStatus}`);
+          console.log(`[TX-CONFIRMATION] Update result:`, updateResult);
+        }
+      } catch (dbError) {
+        console.error(`[TX-CONFIRMATION] Failed to update database:`, dbError);
+        console.error(`[TX-CONFIRMATION] Database error details:`, {
+          message: dbError.message,
+          code: dbError.code,
+          details: dbError.details
+        });
+      }
     })();
   } catch (error) {
     console.error('Trade error in /api/trade-local:', error.message, error);
@@ -1010,12 +1200,70 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
         amount: req.body.amount
       }
     };
+    
+    // Handle Pump Portal API errors specifically
     if (error.response) {
       status = error.response.status || status;
       console.error('Pump Portal API error response:', error.response.data);
-      errorResponse.error = `Pump Portal API Error: ${error.response.data?.error || error.response.data?.message || 'Unknown error'}`;
-      errorResponse.details = error.response.data;
+      
+      let userMessage = 'An error occurred while communicating with Pump Portal.';
+      let errorCode = 'PUMP_PORTAL_ERROR';
+      
+      // Try to parse the error response
+      let pumpPortalError = null;
+      try {
+        if (typeof error.response.data === 'string') {
+          pumpPortalError = JSON.parse(error.response.data);
+        } else {
+          pumpPortalError = error.response.data;
+        }
+      } catch (e) {
+        pumpPortalError = { error: error.response.data };
+      }
+      
+      const errorText = (pumpPortalError?.error || '').toString().toLowerCase();
+      
+      if (errorText.includes('insufficient') || errorText.includes('balance')) {
+        userMessage = 'Insufficient SOL balance to launch this token. Please ensure you have enough SOL for the transaction fee and any initial buy amount.';
+        errorCode = 'INSUFFICIENT_BALANCE';
+        status = 400; // Bad request
+      } else if (errorText.includes('already exists') || errorText.includes('duplicate')) {
+        userMessage = 'A token with this mint address already exists. Please try again with a different mint.';
+        errorCode = 'TOKEN_ALREADY_EXISTS';
+        status = 400;
+      } else if (errorText.includes('invalid') || errorText.includes('invalid mint')) {
+        userMessage = 'Invalid mint address provided. Please check your token configuration.';
+        errorCode = 'INVALID_MINT';
+        status = 400;
+      } else if (errorText.includes('rate limit') || errorText.includes('too many requests')) {
+        userMessage = 'Too many requests to Pump Portal. Please wait a moment and try again.';
+        errorCode = 'RATE_LIMITED';
+        status = 429;
+      } else if (errorText.includes('network') || errorText.includes('connection')) {
+        userMessage = 'Network error occurred while connecting to Pump Portal. Please check your connection and try again.';
+        errorCode = 'NETWORK_ERROR';
+        status = 503;
+      } else if (errorText.includes('timeout')) {
+        userMessage = 'Request to Pump Portal timed out. Please try again.';
+        errorCode = 'TIMEOUT';
+        status = 408;
+      } else if (status === 404) {
+        userMessage = 'Pump Portal service not found. Please try again later.';
+        errorCode = 'SERVICE_NOT_FOUND';
+      } else if (status >= 500) {
+        userMessage = 'Pump Portal service is experiencing issues. Please try again later.';
+        errorCode = 'SERVICE_ERROR';
+      }
+      
+      errorResponse = {
+        error: userMessage,
+        errorCode: errorCode,
+        originalError: pumpPortalError?.error || error.response.data,
+        details: pumpPortalError?.details || null,
+        pumpPortalStatus: status
+      };
     }
+    
     res.status(status).json(errorResponse);
   }
 });
@@ -1115,6 +1363,8 @@ app.get('/api/created-tokens', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+
 
 // --- Test Endpoint for Token Creation (No SOL Cost) ---
 app.post('/api/test/create-token', async (req, res) => {
