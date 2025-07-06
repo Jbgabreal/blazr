@@ -2383,3 +2383,32 @@ app.post('/api/supported-tickers/sync', async (req, res) => {
 // Start Jupiter sync scheduler
 const jupiterScheduler = new JupiterSyncScheduler();
 jupiterScheduler.start();
+
+// --- Endpoint to update the status of a created token by mint address ---
+app.patch('/api/created-tokens/:mint/status', async (req, res) => {
+  const { mint } = req.params;
+  const { status } = req.body;
+  if (!mint) {
+    return res.status(400).json({ error: 'Missing mint address' });
+  }
+  if (!status || !['pending', 'confirmed', 'failed'].includes(status)) {
+    return res.status(400).json({ error: 'Invalid or missing status. Must be one of: pending, confirmed, failed.' });
+  }
+  try {
+    const { data, error } = await supabase
+      .from('created_tokens')
+      .update({ status })
+      .eq('mint_address', mint)
+      .select()
+      .single();
+    if (error) {
+      return res.status(500).json({ error: 'Failed to update status', details: error.message });
+    }
+    if (!data) {
+      return res.status(404).json({ error: 'Token not found' });
+    }
+    res.json({ success: true, token: data });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error', details: err.message });
+  }
+});
