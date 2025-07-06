@@ -879,6 +879,23 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
     timing.pumpPortal = Date.now() - pumpPortalStart;
     console.log('Received response from Pump Portal');
 
+    // Check for error in Pump Portal response (user-friendly)
+    let pumpPortalData;
+    try {
+      pumpPortalData = JSON.parse(Buffer.from(pumpPortalResponse.data).toString());
+    } catch (e) {
+      // If not JSON, ignore (could be binary tx)
+    }
+    if (pumpPortalData && pumpPortalData.error) {
+      let userMessage = 'An error occurred while launching your token.';
+      if (pumpPortalData.error.toLowerCase().includes('insufficient')) {
+        userMessage = 'Insufficient balance to launch this token.';
+      } else if (pumpPortalData.error.toLowerCase().includes('already exists')) {
+        userMessage = 'A token with this mint already exists.';
+      }
+      return res.status(400).json({ error: userMessage });
+    }
+
     const responseDataBuffer = Buffer.from(pumpPortalResponse.data);
     const txBase64 = responseDataBuffer.toString('base64');
     console.log('Serialized transaction (base64):', txBase64);
