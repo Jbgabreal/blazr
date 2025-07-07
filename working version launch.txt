@@ -19,7 +19,6 @@ const { Buffer } = require('buffer');
 const fetch = require('node-fetch');
 const { JupiterTokenService } = require('./src/services/jupiter/tokenService');
 const { JupiterSyncScheduler } = require('./src/services/jupiter/scheduler');
-const { solPriceService } = require('./src/services/marketCap/solPriceService');
 
 // Debug logging for environment variables
 console.log('SUPABASE_URL:', process.env.SUPABASE_URL);
@@ -736,13 +735,13 @@ app.post('/api/rpc/token-accounts', async (req, res) => {
     // Fetch SOL price from Moralis
     let solPrice = 0;
     try {
-      solPrice = await solPriceService.getSolPrice();
+      const solPriceResp = await axios.get(
+        `https://solana-gateway.moralis.io/token/mainnet/So11111111111111111111111111111111111111112/price`,
+        { headers: { 'X-API-Key': process.env.MORALIS_API_KEY } }
+      );
+      solPrice = solPriceResp.data?.usdPrice || 0;
     } catch (e) {
-      console.error('[BalanceCheck] Failed to fetch SOL price from Jupiter:', e.message);
-      return res.status(503).json({
-        error: 'Failed to fetch SOL price. Please try again later.',
-        errorCode: 'SOL_PRICE_UNAVAILABLE'
-      });
+      console.warn('Failed to fetch SOL price from Moralis:', e.message);
     }
     const solUsdValue = solAmount * solPrice;
 
@@ -778,48 +777,6 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
   const timing = {};
 
   try {
-    const { publicKey, amount } = req.body;
-    // Validate publicKey
-    let userPubkey;
-    try {
-      if (!publicKey) throw new Error('Missing publicKey');
-      const solanaWeb3 = require('@solana/web3.js');
-      userPubkey = new solanaWeb3.PublicKey(publicKey);
-    } catch (e) {
-      return res.status(400).json({
-        error: 'Invalid or missing publicKey in request.',
-        errorCode: 'INVALID_PUBLIC_KEY'
-      });
-    }
-    // 1. Fetch user's SOL balance
-    let connection = await getConnection('swap'); // Use helper and let
-    const balanceLamports = await connection.getBalance(userPubkey);
-    const solBalance = balanceLamports / connection.constructor.LAMPORTS_PER_SOL;
-    // 2. Fetch current SOL/USD price from Jupiter (via solPriceService)
-    let solPrice = 0;
-    try {
-      solPrice = await solPriceService.getSolPrice();
-    } catch (e) {
-      console.error('[BalanceCheck] Failed to fetch SOL price from Jupiter:', e.message);
-      return res.status(503).json({
-        error: 'Failed to fetch SOL price. Please try again later.',
-        errorCode: 'SOL_PRICE_UNAVAILABLE'
-      });
-    }
-    // 3. Calculate minimum required SOL
-    const minSol = 4 / solPrice;
-    const inputAmount = Number(amount) || 0;
-    const requiredSol = inputAmount > 0 ? inputAmount + minSol : minSol;
-    // 4. Check if user has enough SOL
-    if (solBalance < requiredSol) {
-      return res.status(400).json({
-        error: `Insufficient SOL balance. You need at least ${(requiredSol).toFixed(4)} SOL (including your buy amount and $4 for fees) to create a token. Your balance: ${solBalance.toFixed(4)} SOL`,
-        errorCode: 'INSUFFICIENT_BALANCE',
-        requiredSol: requiredSol,
-        solBalance: solBalance,
-        solPrice: solPrice
-      });
-    }
     // Validate required fields
     if (!req.body.publicKey) {
       throw new Error('Public key is required');
@@ -842,12 +799,7 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
         const formData = new FormData();
         formData.append('name', tokenMetadata.name);
         formData.append('symbol', tokenMetadata.symbol);
-        // Append 'powered by Blazr' on a new line after the user's description, only if not already present
-        let description = tokenMetadata.description || '';
-        if (!description.toLowerCase().includes('powered by blazr')) {
-          description = description.trim() + '\n\npowered by Blazr';
-        }
-        formData.append('description', description);
+        formData.append('description', tokenMetadata.description || '');
         formData.append('twitter', tokenMetadata.twitter || '');
         formData.append('showName', 'true');
         
@@ -902,109 +854,19 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
       };
     }
 
-    const pumpPortalStart = Date.now();
+    const pumpStart = Date.now();
     console.log('Sending request to Pump Portal:', requestBodyForPumpPortal);
-    console.time('[launchtimer][backend] Pump Portal API Call');
-    console.log('🚨 About to POST to PumpPortal in /api/trade-local:', JSON.stringify(requestBodyForPumpPortal));
-    let pumpPortalResponse;
-    try {
-      pumpPortalResponse = await axios.post('https://pumpportal.fun/api/trade-local', requestBodyForPumpPortal, {
-        timeout: 60000,
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        },
-        responseType: 'arraybuffer'
-      });
-
-    } catch (err) {
-      console.error('🚨 PumpPortal axios.post error:', {
-        message: err.message,
-        status: err.response?.status,
-        statusText: err.response?.statusText,
-        data: err.response?.data,
-        config: {
-          url: err.config?.url,
-          method: err.config?.method,
-          timeout: err.config?.timeout
-        }
-      });
-      throw err;
-    }
-    console.timeEnd('[launchtimer][backend] Pump Portal API Call');
-    const pumpPortalDuration = Date.now() - pumpPortalStart;
-    if (pumpPortalDuration > 2000) {
-      console.warn(`[launchtimer][backend] BLOCKER: Pump Portal API Call took ${pumpPortalDuration}ms`);
-    }
-    timing.pumpPortal = Date.now() - pumpPortalStart;
-    console.log('Received response from Pump Portal');
-
-    // Log the response info from PumpPortal for debugging
-    console.log('[PumpPortal][trade-local] Response info:', {
-      status: pumpPortalResponse.status,
-      statusText: pumpPortalResponse.statusText,
-      headers: pumpPortalResponse.headers,
-      dataLength: pumpPortalResponse.data.length,
-      dataType: typeof pumpPortalResponse.data,
-      isBuffer: Buffer.isBuffer(pumpPortalResponse.data),
-      isArrayBuffer: pumpPortalResponse.data instanceof ArrayBuffer
+    const pumpPortalResponse = await axios.post('https://pumpportal.fun/api/trade-local', requestBodyForPumpPortal, {
+      timeout: 60000,
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+      },
+      responseType: 'arraybuffer'
     });
-    
-    // Only log a small preview of binary data to avoid spam
-    if (Buffer.isBuffer(pumpPortalResponse.data) || pumpPortalResponse.data instanceof ArrayBuffer) {
-      const preview = Buffer.from(pumpPortalResponse.data).toString('hex').substring(0, 100);
-      console.log('[PumpPortal][trade-local] Binary data preview (first 50 bytes):', preview + '...');
-    } else {
-      console.log('[PumpPortal][trade-local] Response data:', pumpPortalResponse.data);
-    }
-
-    // Check for error in Pump Portal response (user-friendly)
-    let pumpPortalData;
-    try {
-      pumpPortalData = JSON.parse(Buffer.from(pumpPortalResponse.data).toString());
-    } catch (e) {
-      // If not JSON, ignore (could be binary tx)
-      console.log('[PumpPortal] Response is not JSON (likely binary transaction data)');
-    }
-    
-    if (pumpPortalData && pumpPortalData.error) {
-      console.error('[PumpPortal] Error response:', pumpPortalData);
-      
-      let userMessage = 'An error occurred while launching your token.';
-      let errorCode = 'UNKNOWN_ERROR';
-      
-      const errorText = pumpPortalData.error.toString().toLowerCase();
-      
-      if (errorText.includes('insufficient') || errorText.includes('balance')) {
-        userMessage = 'Insufficient SOL balance to launch this token. Please ensure you have enough SOL for the transaction fee and any initial buy amount.';
-        errorCode = 'INSUFFICIENT_BALANCE';
-      } else if (errorText.includes('already exists') || errorText.includes('duplicate')) {
-        userMessage = 'A token with this mint address already exists. Please try again with a different mint.';
-        errorCode = 'TOKEN_ALREADY_EXISTS';
-      } else if (errorText.includes('invalid') || errorText.includes('invalid mint')) {
-        userMessage = 'Invalid mint address provided. Please check your token configuration.';
-        errorCode = 'INVALID_MINT';
-      } else if (errorText.includes('rate limit') || errorText.includes('too many requests')) {
-        userMessage = 'Too many requests. Please wait a moment and try again.';
-        errorCode = 'RATE_LIMITED';
-      } else if (errorText.includes('network') || errorText.includes('connection')) {
-        userMessage = 'Network error occurred. Please check your connection and try again.';
-        errorCode = 'NETWORK_ERROR';
-      } else if (errorText.includes('timeout')) {
-        userMessage = 'Request timed out. Please try again.';
-        errorCode = 'TIMEOUT';
-      }
-      
-      console.error(`[PumpPortal] User-friendly error: ${userMessage} (Code: ${errorCode})`);
-      
-      return res.status(400).json({ 
-        error: userMessage,
-        errorCode: errorCode,
-        originalError: pumpPortalData.error,
-        details: pumpPortalData.details || null
-      });
-    }
+    timing.pumpPortal = Date.now() - pumpStart;
+    console.log('Received response from Pump Portal');
 
     const responseDataBuffer = Buffer.from(pumpPortalResponse.data);
     const txBase64 = responseDataBuffer.toString('base64');
@@ -1116,70 +978,12 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
         amount: req.body.amount
       }
     };
-    
-    // Handle Pump Portal API errors specifically
     if (error.response) {
       status = error.response.status || status;
       console.error('Pump Portal API error response:', error.response.data);
-      
-      let userMessage = 'An error occurred while communicating with Pump Portal.';
-      let errorCode = 'PUMP_PORTAL_ERROR';
-      
-      // Try to parse the error response
-      let pumpPortalError = null;
-      try {
-        if (typeof error.response.data === 'string') {
-          pumpPortalError = JSON.parse(error.response.data);
-        } else {
-          pumpPortalError = error.response.data;
-        }
-      } catch (e) {
-        pumpPortalError = { error: error.response.data };
-      }
-      
-      const errorText = (pumpPortalError?.error || '').toString().toLowerCase();
-      
-      if (errorText.includes('insufficient') || errorText.includes('balance')) {
-        userMessage = 'Insufficient SOL balance to launch this token. Please ensure you have enough SOL for the transaction fee and any initial buy amount.';
-        errorCode = 'INSUFFICIENT_BALANCE';
-        status = 400; // Bad request
-      } else if (errorText.includes('already exists') || errorText.includes('duplicate')) {
-        userMessage = 'A token with this mint address already exists. Please try again with a different mint.';
-        errorCode = 'TOKEN_ALREADY_EXISTS';
-        status = 400;
-      } else if (errorText.includes('invalid') || errorText.includes('invalid mint')) {
-        userMessage = 'Invalid mint address provided. Please check your token configuration.';
-        errorCode = 'INVALID_MINT';
-        status = 400;
-      } else if (errorText.includes('rate limit') || errorText.includes('too many requests')) {
-        userMessage = 'Too many requests to Pump Portal. Please wait a moment and try again.';
-        errorCode = 'RATE_LIMITED';
-        status = 429;
-      } else if (errorText.includes('network') || errorText.includes('connection')) {
-        userMessage = 'Network error occurred while connecting to Pump Portal. Please check your connection and try again.';
-        errorCode = 'NETWORK_ERROR';
-        status = 503;
-      } else if (errorText.includes('timeout')) {
-        userMessage = 'Request to Pump Portal timed out. Please try again.';
-        errorCode = 'TIMEOUT';
-        status = 408;
-      } else if (status === 404) {
-        userMessage = 'Pump Portal service not found. Please try again later.';
-        errorCode = 'SERVICE_NOT_FOUND';
-      } else if (status >= 500) {
-        userMessage = 'Pump Portal service is experiencing issues. Please try again later.';
-        errorCode = 'SERVICE_ERROR';
-      }
-      
-      errorResponse = {
-        error: userMessage,
-        errorCode: errorCode,
-        originalError: pumpPortalError?.error || error.response.data,
-        details: pumpPortalError?.details || null,
-        pumpPortalStatus: status
-      };
+      errorResponse.error = `Pump Portal API Error: ${error.response.data?.error || error.response.data?.message || 'Unknown error'}`;
+      errorResponse.details = error.response.data;
     }
-    
     res.status(status).json(errorResponse);
   }
 });
@@ -1280,8 +1084,6 @@ app.get('/api/created-tokens', async (req, res) => {
   }
 });
 
-
-
 // --- Test Endpoint for Token Creation (No SOL Cost) ---
 app.post('/api/test/create-token', async (req, res) => {
   try {
@@ -1369,8 +1171,6 @@ app.post('/api/test/create-token', async (req, res) => {
 
 // --- Endpoint to CREATE a new token (for token launch) ---
 app.post('/api/created-tokens', async (req, res) => {
-  console.log('[launchtimer][backend] /api/created-tokens request received');
-  console.time('[launchtimer][backend] DB Save');
   try {
     const { 
       mint, 
@@ -1387,7 +1187,6 @@ app.post('/api/created-tokens', async (req, res) => {
     } = req.body;
 
     if (!mint || !name || !symbol || !publicKey) {
-      console.timeEnd('[launchtimer][backend] DB Save');
       return res.status(400).json({ 
         error: 'Missing required fields',
         required: ['mint', 'name', 'symbol', 'publicKey']
@@ -1413,23 +1212,19 @@ app.post('/api/created-tokens', async (req, res) => {
         user_public_key: publicKey,
         created_at: launchedAt ? new Date(launchedAt).toISOString() : new Date().toISOString(),
         tx_signature: txSignature || null,
-        is_test: false,
-        status: 'pending'
+        is_test: false
       })
       .select()
       .single();
 
     if (error) {
       console.error('Database insert error:', error);
-      console.timeEnd('[launchtimer][backend] DB Save');
       throw error;
     }
 
     // No caching - always fetch live data
     console.log('[TOKEN-CREATION] Token created, mint:', mint);
 
-    console.timeEnd('[launchtimer][backend] DB Save');
-    console.log('[launchtimer][backend] /api/created-tokens response sent');
     res.json({ 
       success: true, 
       token: data,
@@ -1437,7 +1232,6 @@ app.post('/api/created-tokens', async (req, res) => {
     });
   } catch (err) {
     console.error('Create token error:', err);
-    console.timeEnd('[launchtimer][backend] DB Save');
     res.status(500).json({ 
       error: 'Failed to create token',
       details: err.message 
@@ -2569,32 +2363,3 @@ app.post('/api/supported-tickers/sync', async (req, res) => {
 // Start Jupiter sync scheduler
 const jupiterScheduler = new JupiterSyncScheduler();
 jupiterScheduler.start();
-
-// --- Endpoint to update the status of a created token by mint address ---
-app.patch('/api/created-tokens/:mint/status', async (req, res) => {
-  const { mint } = req.params;
-  const { status } = req.body;
-  if (!mint) {
-    return res.status(400).json({ error: 'Missing mint address' });
-  }
-  if (!status || !['pending', 'confirmed', 'failed'].includes(status)) {
-    return res.status(400).json({ error: 'Invalid or missing status. Must be one of: pending, confirmed, failed.' });
-  }
-  try {
-    const { data, error } = await supabase
-      .from('created_tokens')
-      .update({ status })
-      .eq('mint_address', mint)
-      .select()
-      .single();
-    if (error) {
-      return res.status(500).json({ error: 'Failed to update status', details: error.message });
-    }
-    if (!data) {
-      return res.status(404).json({ error: 'Token not found' });
-    }
-    res.json({ success: true, token: data });
-  } catch (err) {
-    res.status(500).json({ error: 'Server error', details: err.message });
-  }
-});
