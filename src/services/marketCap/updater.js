@@ -74,11 +74,6 @@ function initializeWebSocket() {
  * Handle incoming WebSocket messages
  */
 function handleWebSocketMessage(message) {
-  console.log('🟢 [PumpPortal] Raw data received:', message);
-  console.log('📡 Received WebSocket message from PumpPortal:');
-  console.log('   Message type:', message.type || 'unknown');
-  console.log('   Full message:', JSON.stringify(message, null, 2));
-  
   // Handle token trade events from PumpPortal
   // PumpPortal sends trade data with marketCapSol field
   if (message.mint && message.marketCapSol !== undefined) {
@@ -88,12 +83,12 @@ function handleWebSocketMessage(message) {
     const solAmount = message.solAmount;
     const tokenAmount = message.tokenAmount;
     
-    console.log('📊 Processing PumpPortal trade data:');
-    console.log('   Token Address:', tokenAddress);
-    console.log('   Transaction Type:', txType);
-    console.log('   SOL Amount:', solAmount);
-    console.log('   Token Amount:', tokenAmount);
-    console.log('   Market Cap (SOL):', marketCapSol);
+    console.log('📊 [PumpPortal] Trade detected:', {
+      token: tokenAddress.slice(0, 8) + '...',
+      type: txType,
+      solAmount: solAmount,
+      marketCap: marketCapSol + ' SOL'
+    });
     
     // Update cache with latest market cap data
     tokenPriceCache.set(tokenAddress, {
@@ -103,13 +98,13 @@ function handleWebSocketMessage(message) {
       lastTokenAmount: tokenAmount,
       lastUpdated: new Date().toISOString()
     });
-    
-    console.log('✅ Updated cache for token:', tokenAddress);
-    console.log('   Market cap in SOL:', marketCapSol);
   } else if (message.message === 'Successfully subscribed to keys.') {
-    console.log('✅ Successfully subscribed to PumpPortal token trades');
+    console.log('✅ PumpPortal WebSocket connected and subscribed');
   } else {
-    console.log('⚠️  Unknown message type or missing data');
+    // Only log unknown messages in debug mode
+    if (process.env.DEBUG_WEBSOCKET) {
+      console.log('⚠️  Unknown WebSocket message:', message);
+    }
   }
 }
 
@@ -124,20 +119,15 @@ function subscribeToTokenTrades(tokenAddresses) {
     return;
   }
 
-  console.log('📡 Subscribing to PumpPortal token trades:');
-  console.log('   Tokens to subscribe:', tokenAddresses);
-  console.log('   Number of tokens:', tokenAddresses.length);
-
   // Subscribe to specific token trades (this is the correct method for market cap data)
   const tradePayload = {
     method: "subscribeTokenTrade",
     keys: tokenAddresses
   };
 
-  console.log('   Trade subscription payload:', JSON.stringify(tradePayload, null, 2));
   wsConnection.send(JSON.stringify(tradePayload));
   
-  console.log(`📡 Subscribed to trade data for ${tokenAddresses.length} tokens`);
+  console.log(`📡 Subscribed to ${tokenAddresses.length} tokens on PumpPortal`);
 }
 
 /**
@@ -154,9 +144,6 @@ async function calculateMarketCapInUsd(tokenMint, marketCapInSol) {
   try {
     // If market cap is 0, return 0 for USD as well
     if (marketCapInSol === 0) {
-      console.log(`💱 Market cap calculation for ${tokenMint}:`);
-      console.log(`   Market cap in SOL: 0`);
-      console.log(`   Market cap in USD: $0.00`);
       return {
         marketCapUsd: 0,
         marketCapSol: 0,
@@ -186,9 +173,6 @@ async function getTokensNeedingUpdate() {
   try {
     const fifteenSecondsAgo = new Date(Date.now() - 15 * 1000).toISOString();
     
-    console.log('🔍 Fetching tokens needing market cap updates...');
-    console.log('   Cutoff time:', fifteenSecondsAgo);
-    
     const { data, error } = await supabase
       .from('created_tokens')
       .select('id, mint_address, token_name, market_cap, last_market_cap_update')
@@ -199,14 +183,6 @@ async function getTokensNeedingUpdate() {
     if (error) {
       throw error;
     }
-
-    console.log('📋 Tokens from database:');
-    data.forEach((token, index) => {
-      console.log(`   ${index + 1}. ${token.token_name || 'Unknown'}`);
-      console.log(`      Mint: ${token.mint_address}`);
-      console.log(`      Current Market Cap: ${token.market_cap || 'NULL'}`);
-      console.log(`      Last Update: ${token.last_market_cap_update || 'NULL'}`);
-    });
 
     return data || [];
   } catch (error) {
@@ -220,7 +196,6 @@ async function getTokensNeedingUpdate() {
  */
 async function updateTokenMarketCap(tokenId, tokenAddress) {
   try {
-    console.log(`📊 Updating market cap for token: ${tokenAddress}`);
     
     // First try to get cached market cap data from PumpPortal
     let cachedData = getCachedTokenPrice(tokenAddress);
@@ -232,10 +207,8 @@ async function updateTokenMarketCap(tokenId, tokenAddress) {
       // Use real market cap data from PumpPortal
       marketCapSol = cachedData.marketCapSol;
       dataSource = 'real-time';
-      console.log(`📊 Using real market cap data from PumpPortal: ${marketCapSol} SOL`);
+      console.log(`📊 [${tokenAddress.slice(0, 8)}...] Using real-time data: ${marketCapSol} SOL`);
     } else {
-      // No new real data available, check if we have a cached value in database
-      console.log(`🔄 No new real data for ${tokenAddress}, checking cached value in database`);
       
       // Get current market cap from database to use as fallback
       const { data: currentToken, error: dbError } = await supabase
@@ -254,17 +227,14 @@ async function updateTokenMarketCap(tokenId, tokenAddress) {
         if (solPriceData && solPriceData.price > 0) {
           marketCapSol = currentToken.market_cap / solPriceData.price;
           dataSource = 'cached';
-          console.log(`📊 Using cached market cap from database: ${marketCapSol.toFixed(4)} SOL (${currentToken.market_cap.toFixed(2)} USD)`);
         } else {
           marketCapSol = 0;
           dataSource = 'none';
-          console.log(`📊 No SOL price available, using 0 for market cap`);
         }
       } else {
         // No cached value available, use 0
         marketCapSol = 0;
         dataSource = 'none';
-        console.log(`📊 No cached value available, using 0 for market cap`);
       }
     }
 
@@ -280,25 +250,18 @@ async function updateTokenMarketCap(tokenId, tokenAddress) {
     const shouldUpdate = dataSource === 'real-time' || (dataSource === 'none' && marketCapSol === 0);
     
     if (shouldUpdate) {
-    const { error } = await supabase
-      .from('created_tokens')
-      .update({
-        market_cap: marketCapResult.marketCapUsd, // Store USD value in database
-        last_market_cap_update: new Date().toISOString()
-      })
-      .eq('id', tokenId);
+      const { error } = await supabase
+        .from('created_tokens')
+        .update({
+          market_cap: marketCapResult.marketCapUsd, // Store USD value in database
+          last_market_cap_update: new Date().toISOString()
+        })
+        .eq('id', tokenId);
 
-    if (error) {
-      throw error;
+      if (error) {
+        throw error;
       }
-    } else {
-      console.log(`📋 Skipping database update for ${tokenAddress} (using cached value)`);
     }
-
-    console.log(`✅ Updated market cap for ${tokenAddress}:`);
-    console.log(`   Market cap in SOL: ${marketCapResult.marketCapSol}`);
-    console.log(`   Market cap in USD: $${marketCapResult.marketCapUsd.toFixed(2)}`);
-    console.log(`   Data source: ${dataSource}`);
     
     return { 
       updated: shouldUpdate, 
@@ -316,8 +279,6 @@ async function updateTokenMarketCap(tokenId, tokenAddress) {
  * Main function to update market caps for all tokens
  */
 async function updateMarketCaps() {
-  console.log('🚀 Starting market cap update process...');
-  
   const startTime = Date.now();
   let tokensUpdated = 0;
   let tokensProcessed = 0;
@@ -329,8 +290,7 @@ async function updateMarketCaps() {
 
     // Get tokens that need updates
     const tokens = await getTokensNeedingUpdate();
-    console.log(`📋 Found ${tokens.length} tokens needing market cap updates`);
-
+    
     if (tokens.length === 0) {
       return {
         tokensUpdated: 0,
@@ -340,12 +300,13 @@ async function updateMarketCaps() {
       };
     }
 
+    console.log(`📋 Processing ${tokens.length} tokens for market cap updates`);
+
     // Subscribe to trade data for all tokens
     const tokenAddresses = tokens.map(token => token.mint_address);
     subscribeToTokenTrades(tokenAddresses);
 
     // Wait a bit for real-time data to come in (if any trades happen)
-    console.log('⏳ Waiting for real-time trade data...');
     await new Promise(resolve => setTimeout(resolve, 5000));
 
     // Process tokens
@@ -364,8 +325,7 @@ async function updateMarketCaps() {
     }
 
     const duration = Date.now() - startTime;
-    console.log(`✅ Market cap update completed in ${duration}ms`);
-    console.log(`📊 Results: ${tokensUpdated} updated, ${tokensProcessed} processed, ${errors.length} errors`);
+    console.log(`✅ Market cap update: ${tokensUpdated}/${tokensProcessed} updated in ${duration}ms`);
 
     return {
       tokensUpdated,
@@ -423,4 +383,4 @@ module.exports = {
   subscribeToTokenTrades,
   getCachedTokenPrice,
   calculateMarketCapInUsd
-}; 
+};

@@ -32,8 +32,6 @@ class SolPriceService {
         timeout: 10000
       });
 
-      console.log('🔍 Jupiter API Response:', JSON.stringify(response.data, null, 2));
-
       if (response.data && response.data.outAmount) {
         const solPrice = parseFloat(response.data.outAmount) / 1000000; // USDC has 6 decimals
         

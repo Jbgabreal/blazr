@@ -17,7 +17,10 @@ class TokenPriceService {
    */
   async fetchTokenPrice(tokenMint, amount = '1000000000') {
     try {
-      console.log(`💰 Fetching price for token: ${tokenMint}`);
+      // Only log for SOL price fetches to reduce noise
+      if (tokenMint === SOL_MINT) {
+        console.log(`💰 Fetching SOL price from Jupiter...`);
+      }
       
       const response = await axios.get(JUPITER_QUOTE_API, {
         params: {
@@ -34,7 +37,10 @@ class TokenPriceService {
       if (response.data && response.data.outAmount) {
         const tokenPrice = parseFloat(response.data.outAmount) / 1000000; // USDC has 6 decimals
         
-        console.log(`✅ Token price updated: $${tokenPrice.toFixed(6)} USD`);
+        // Only log for SOL price updates
+        if (tokenMint === SOL_MINT) {
+          console.log(`✅ SOL price updated: $${tokenPrice.toFixed(2)} USD`);
+        }
         return {
           price: tokenPrice,
           outAmount: response.data.outAmount,
@@ -60,7 +66,6 @@ class TokenPriceService {
       const lastUpdate = this.lastUpdate.get(tokenMint);
       
       if (lastUpdate && (Date.now() - lastUpdate) < this.cacheTimeout) {
-        console.log(`📋 Using cached price for ${tokenMint}: $${cached.price.toFixed(6)} USD`);
         return cached;
       }
     }
@@ -90,9 +95,6 @@ class TokenPriceService {
     try {
       // If market cap is 0, return 0 for USD as well
       if (marketCapInSol === 0) {
-        console.log(`💱 Market cap calculation for ${tokenMint}:`);
-        console.log(`   Market cap in SOL: 0`);
-        console.log(`   Market cap in USD: $0.00`);
         return {
           marketCapUsd: 0,
           solPrice: 0,
@@ -109,10 +111,6 @@ class TokenPriceService {
       }
       // Convert market cap from SOL to USD
       const marketCapInUsd = marketCapInSol * solPriceData.price;
-      console.log(`💱 Market cap calculation for ${tokenMint}:`);
-      console.log(`   Market cap in SOL: ${marketCapInSol}`);
-      console.log(`   SOL price: $${solPriceData.price.toFixed(2)} USD`);
-      console.log(`   Market cap in USD: $${marketCapInUsd.toFixed(2)} USD`);
       return {
         marketCapUsd: marketCapInUsd,
         solPrice: solPriceData.price,

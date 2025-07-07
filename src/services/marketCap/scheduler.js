@@ -41,7 +41,6 @@ class MarketCapScheduler {
 
   async performUpdate() {
     const startTime = new Date();
-    console.log(`📊 Starting market cap update at ${startTime.toISOString()}`);
 
     try {
       this.lastJobStatus = {
@@ -62,7 +61,10 @@ class MarketCapScheduler {
         errors: result.errors || []
       };
 
-      console.log(`✅ Market cap update completed: ${result.tokensUpdated} tokens updated`);
+      // Only log if there were updates or errors
+      if (result.tokensUpdated > 0 || result.errors.length > 0) {
+        console.log(`✅ Market cap update completed: ${result.tokensUpdated} tokens updated`);
+      }
     } catch (error) {
       console.error('❌ Market cap update failed:', error);
       
@@ -100,10 +102,10 @@ const marketCapScheduler = new MarketCapScheduler();
 
 // Auto-start in all environments
 if (process.env.NODE_ENV !== 'test') {
-      // Start with a small delay to ensure server is fully initialized
-    setTimeout(() => {
-      marketCapScheduler.start(0.25);
-    }, 5000);
+  // Start with a small delay to ensure server is fully initialized
+  setTimeout(() => {
+    marketCapScheduler.start(0.25);
+  }, 5000);
 }
 
 module.exports = { marketCapScheduler }; 

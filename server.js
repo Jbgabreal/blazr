@@ -776,7 +776,6 @@ app.post('/api/rpc/token-accounts', async (req, res) => {
 app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
   const start = Date.now();
   const timing = {};
-
   try {
     const { publicKey, amount } = req.body;
     // Validate publicKey
@@ -789,35 +788,6 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
       return res.status(400).json({
         error: 'Invalid or missing publicKey in request.',
         errorCode: 'INVALID_PUBLIC_KEY'
-      });
-    }
-    // 1. Fetch user's SOL balance
-    let connection = await getConnection('swap'); // Use helper and let
-    const balanceLamports = await connection.getBalance(userPubkey);
-    const solBalance = balanceLamports / connection.constructor.LAMPORTS_PER_SOL;
-    // 2. Fetch current SOL/USD price from Jupiter (via solPriceService)
-    let solPrice = 0;
-    try {
-      solPrice = await solPriceService.getSolPrice();
-    } catch (e) {
-      console.error('[BalanceCheck] Failed to fetch SOL price from Jupiter:', e.message);
-      return res.status(503).json({
-        error: 'Failed to fetch SOL price. Please try again later.',
-        errorCode: 'SOL_PRICE_UNAVAILABLE'
-      });
-    }
-    // 3. Calculate minimum required SOL
-    const minSol = 4 / solPrice;
-    const inputAmount = Number(amount) || 0;
-    const requiredSol = inputAmount > 0 ? inputAmount + minSol : minSol;
-    // 4. Check if user has enough SOL
-    if (solBalance < requiredSol) {
-      return res.status(400).json({
-        error: `Insufficient SOL balance. You need at least ${(requiredSol).toFixed(4)} SOL (including your buy amount and $4 for fees) to create a token. Your balance: ${solBalance.toFixed(4)} SOL`,
-        errorCode: 'INSUFFICIENT_BALANCE',
-        requiredSol: requiredSol,
-        solBalance: solBalance,
-        solPrice: solPrice
       });
     }
     // Validate required fields
@@ -1013,8 +983,7 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
     // Advanced retry logic
     const rpcUrls = [process.env.SWAP_SOLANA_RPC_URL, process.env.SWAP2_SOLANA_RPC_URL].filter(Boolean);
     const maxAttempts = 2;
-    const maxPolls = 15;
-    const basePollInterval = 1000; // ms
+    const quickCheckTimeout = 3000; // 3 seconds max for quick check
 
     let signature = null;
     let lastError = null;
@@ -1063,21 +1032,17 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
           sendTiming = Date.now() - sendStart;
           console.log(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Transaction sent, signature:`, signature);
 
-          // Poll for 'processed' status with exponential backoff
-          let processed = false;
-          for (let i = 0; i < maxPolls; i++) {
-            const status = await connection.getSignatureStatus(signature);
-            if (status && status.value && status.value.confirmationStatus === 'processed') {
-              processed = true;
-              break;
-            }
-            const wait = basePollInterval * Math.pow(1.5, attempt); // Exponential backoff per attempt
-            await new Promise(res => setTimeout(res, wait));
+          // Quick check that transaction was accepted (with timeout)
+          const quickStatus = await Promise.race([
+            connection.getSignatureStatus(signature),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Quick status check timeout')), quickCheckTimeout))
+          ]);
+          
+          if (!quickStatus || !quickStatus.value) {
+            throw new Error(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Transaction not accepted by network`);
           }
-          if (!processed) {
-            throw new Error(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Transaction not propagated to the network (not processed after ${maxPolls * basePollInterval / 1000}s)`);
-          }
-          console.log(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Transaction is processed on the network:`, signature);
+          
+          console.log(`[Attempt ${attempt + 1}, RPC ${rpcIdx + 1}] Transaction accepted by network:`, signature);
           usedBackupRpc = rpcIdx === 1;
           break; // Success
         } catch (err) {
@@ -1102,7 +1067,156 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
     if (!signature) {
       throw lastError || new Error('Failed to send transaction');
     }
-    res.json({ status: 'pending', signature, timing, usedBackupRpc });
+
+    // Start background confirmation process
+    const confirmTransaction = async () => {
+      try {
+        console.log(`[Background] Starting confirmation for signature: ${signature}`);
+        
+        // Use the same connection that successfully sent the transaction
+        const confirmConnection = new Connection(rpcUrls[usedBackupRpc ? 1 : 0], 'confirmed');
+        
+        // Wait for confirmation with reasonable timeout
+        const confirmation = await Promise.race([
+          confirmConnection.confirmTransaction(signature, 'confirmed'),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Confirmation timeout')), 45000))
+        ]);
+
+        if (confirmation.value && !confirmation.value.err) {
+          console.log(`[Background] ✅ Transaction confirmed: ${signature}`);
+          
+          // Update database with confirmed status
+          if (req.body.action === 'create') {
+            try {
+              // Try to find by mint address first
+              let updateResult = await supabase
+                .from('created_tokens')
+                .update({ 
+                  status: 'confirmed', 
+                  confirmed_at: new Date().toISOString(),
+                  tx_signature: signature
+                })
+                .eq('mint_address', req.body.mint)
+                .select();
+
+              // If no rows updated, try to find by signature
+              if (!updateResult.data || updateResult.data.length === 0) {
+                console.log(`[Background] No token found by mint, trying signature: ${signature}`);
+                updateResult = await supabase
+                  .from('created_tokens')
+                  .update({ 
+                    status: 'confirmed', 
+                    confirmed_at: new Date().toISOString(),
+                    tx_signature: signature
+                  })
+                  .eq('tx_signature', signature)
+                  .select();
+              }
+
+              if (updateResult.data && updateResult.data.length > 0) {
+                console.log(`[Background] Database updated successfully for signature: ${signature}`);
+              } else {
+                console.log(`[Background] No token record found to update for signature: ${signature}`);
+              }
+            } catch (dbError) {
+              console.error(`[Background] Database update failed:`, dbError);
+            }
+          }
+        } else {
+          console.error(`[Background] ❌ Transaction failed: ${signature}`, confirmation.value?.err);
+          
+          // Update database with failed status
+          if (req.body.action === 'create') {
+            try {
+              // Try to find by mint address first
+              let updateResult = await supabase
+        .from('created_tokens')
+                .update({ 
+                  status: 'failed', 
+                  confirmed_at: null,
+                  tx_signature: signature
+                })
+                .eq('mint_address', req.body.mint)
+                .select();
+
+              // If no rows updated, try to find by signature
+              if (!updateResult.data || updateResult.data.length === 0) {
+                updateResult = await supabase
+                  .from('created_tokens')
+                  .update({ 
+                    status: 'failed', 
+                    confirmed_at: null,
+                    tx_signature: signature
+                  })
+                  .eq('tx_signature', signature)
+                  .select();
+              }
+
+              if (updateResult.data && updateResult.data.length > 0) {
+                console.log(`[Background] Database updated with failed status for signature: ${signature}`);
+              } else {
+                console.log(`[Background] No token record found to update failed status for signature: ${signature}`);
+              }
+            } catch (dbError) {
+              console.error(`[Background] Database update failed:`, dbError);
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`[Background] ❌ Confirmation error for ${signature}:`, error.message);
+        
+                  // Update database with error status
+          if (req.body.action === 'create') {
+            try {
+              // Try to find by mint address first
+              let updateResult = await supabase
+                .from('created_tokens')
+                .update({ 
+                  status: 'error', 
+                  confirmed_at: null,
+                  tx_signature: signature
+                })
+                .eq('mint_address', req.body.mint)
+                .select();
+
+              // If no rows updated, try to find by signature
+              if (!updateResult.data || updateResult.data.length === 0) {
+                updateResult = await supabase
+                  .from('created_tokens')
+                  .update({ 
+                    status: 'error', 
+                    confirmed_at: null,
+                    tx_signature: signature
+                  })
+                  .eq('tx_signature', signature)
+                  .select();
+              }
+
+              if (updateResult.data && updateResult.data.length > 0) {
+                console.log(`[Background] Database updated with error status for signature: ${signature}`);
+              } else {
+                console.log(`[Background] No token record found to update error status for signature: ${signature}`);
+              }
+            } catch (dbError) {
+              console.error(`[Background] Database update failed:`, dbError);
+            }
+          }
+      }
+    };
+
+    // Start background confirmation (don't await)
+    confirmTransaction().catch(err => {
+      console.error('[Background] Unhandled confirmation error:', err);
+    });
+
+    // Return immediately with pending status
+    res.json({ 
+      status: 'pending', 
+      signature, 
+      timing, 
+      usedBackupRpc,
+      message: 'Transaction sent successfully. Confirming in background...'
+    });
   } catch (error) {
     console.error('Trade error in /api/trade-local:', error.message, error);
     let status = 500;
@@ -1181,6 +1295,211 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
     }
     
     res.status(status).json(errorResponse);
+  }
+});
+
+// --- Transaction Status Check Endpoint ---
+app.get('/api/transaction/:signature/status', async (req, res) => {
+  try {
+    const { signature } = req.params;
+    if (!signature) {
+      return res.status(400).json({ error: 'Signature is required' });
+    }
+
+    // Check database first
+    const { data: dbToken, error: dbError } = await supabase
+      .from('created_tokens')
+      .select('status, confirmed_at, mint_address')
+      .eq('tx_signature', signature)
+      .single();
+
+    if (dbToken) {
+      return res.json({
+        signature,
+        status: dbToken.status,
+        confirmed_at: dbToken.confirmed_at,
+        mint_address: dbToken.mint_address,
+        source: 'database'
+      });
+    }
+
+    // If not in database, check on-chain status
+    const connection = await getConnection('swap');
+    const status = await connection.getSignatureStatus(signature);
+    
+    if (!status || !status.value) {
+      return res.json({
+        signature,
+        status: 'unknown',
+        confirmed_at: null,
+        source: 'blockchain'
+      });
+    }
+
+    const confirmationStatus = status.value.confirmationStatus;
+    let finalStatus = 'pending';
+    
+    if (confirmationStatus === 'confirmed' || confirmationStatus === 'finalized') {
+      finalStatus = status.value.err ? 'failed' : 'confirmed';
+    } else if (confirmationStatus === 'processed') {
+      finalStatus = 'processed';
+    }
+
+    return res.json({
+      signature,
+      status: finalStatus,
+      confirmed_at: finalStatus === 'confirmed' ? new Date().toISOString() : null,
+      source: 'blockchain',
+      confirmation_status: confirmationStatus,
+      error: status.value.err
+    });
+
+  } catch (error) {
+    console.error('Transaction status check error:', error);
+    res.status(500).json({ 
+      error: 'Failed to check transaction status',
+      details: error.message 
+    });
+  }
+});
+
+// --- Bulk Transaction Status Check Endpoint ---
+app.post('/api/transactions/status', async (req, res) => {
+  try {
+    const { signatures } = req.body;
+    if (!signatures || !Array.isArray(signatures)) {
+      return res.status(400).json({ error: 'signatures array is required' });
+    }
+
+    const results = [];
+    const connection = await getConnection('swap');
+
+    for (const signature of signatures) {
+      try {
+        // Check database first
+        const { data: dbToken } = await supabase
+          .from('created_tokens')
+          .select('status, confirmed_at, mint_address')
+          .eq('tx_signature', signature)
+          .single();
+
+        if (dbToken) {
+          results.push({
+            signature,
+            status: dbToken.status,
+            confirmed_at: dbToken.confirmed_at,
+            mint_address: dbToken.mint_address,
+            source: 'database'
+          });
+          continue;
+        }
+
+        // Check on-chain status
+        const status = await connection.getSignatureStatus(signature);
+        
+        if (!status || !status.value) {
+          results.push({
+            signature,
+            status: 'unknown',
+            confirmed_at: null,
+            source: 'blockchain'
+          });
+          continue;
+        }
+
+        const confirmationStatus = status.value.confirmationStatus;
+        let finalStatus = 'pending';
+        
+        if (confirmationStatus === 'confirmed' || confirmationStatus === 'finalized') {
+          finalStatus = status.value.err ? 'failed' : 'confirmed';
+        } else if (confirmationStatus === 'processed') {
+          finalStatus = 'processed';
+        }
+
+        results.push({
+          signature,
+          status: finalStatus,
+          confirmed_at: finalStatus === 'confirmed' ? new Date().toISOString() : null,
+          source: 'blockchain',
+          confirmation_status: confirmationStatus,
+          error: status.value.err
+        });
+
+      } catch (error) {
+        results.push({
+          signature,
+          status: 'error',
+          error: error.message,
+          source: 'error'
+        });
+      }
+    }
+
+    res.json({
+      results,
+      total: results.length,
+      checked: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Bulk transaction status check error:', error);
+    res.status(500).json({ 
+      error: 'Failed to check transaction statuses',
+      details: error.message 
+    });
+  }
+});
+
+// --- Manual Token Status Update Endpoint (for debugging) ---
+app.post('/api/token/:mint/update-status', async (req, res) => {
+  try {
+    const { mint } = req.params;
+    const { status, signature } = req.body;
+    
+    if (!mint || !status) {
+      return res.status(400).json({ error: 'Missing mint or status' });
+    }
+
+    const updateData = {
+      status: status,
+      last_updated: new Date().toISOString()
+    };
+
+    if (status === 'confirmed') {
+      updateData.confirmed_at = new Date().toISOString();
+    } else {
+      updateData.confirmed_at = null;
+    }
+
+    if (signature) {
+      updateData.tx_signature = signature;
+    }
+
+    const { data, error } = await supabase
+      .from('created_tokens')
+      .update(updateData)
+      .eq('mint_address', mint)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Manual status update error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    if (!data) {
+      return res.status(404).json({ error: 'Token not found' });
+    }
+
+    res.json({
+      success: true,
+      token: data,
+      message: `Status updated to ${status}`
+    });
+
+  } catch (error) {
+    console.error('Manual status update error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
