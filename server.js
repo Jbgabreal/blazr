@@ -19,6 +19,7 @@ const { Buffer } = require('buffer');
 const fetch = require('node-fetch');
 const { JupiterTokenService } = require('./src/services/jupiter/tokenService');
 const { JupiterSyncScheduler } = require('./src/services/jupiter/scheduler');
+const { solPriceService } = require('./src/services/marketCap/solPriceService');
 
 // Debug logging for environment variables
 console.log('SUPABASE_URL:', process.env.SUPABASE_URL);
@@ -735,13 +736,13 @@ app.post('/api/rpc/token-accounts', async (req, res) => {
     // Fetch SOL price from Moralis
     let solPrice = 0;
     try {
-      const solPriceResp = await axios.get(
-        `https://solana-gateway.moralis.io/token/mainnet/So11111111111111111111111111111111111111112/price`,
-        { headers: { 'X-API-Key': process.env.MORALIS_API_KEY } }
-      );
-      solPrice = solPriceResp.data?.usdPrice || 0;
+      solPrice = await solPriceService.getSolPrice();
     } catch (e) {
-      console.warn('Failed to fetch SOL price from Moralis:', e.message);
+      console.error('[BalanceCheck] Failed to fetch SOL price from Jupiter:', e.message);
+      return res.status(503).json({
+        error: 'Failed to fetch SOL price. Please try again later.',
+        errorCode: 'SOL_PRICE_UNAVAILABLE'
+      });
     }
     const solUsdValue = solAmount * solPrice;
 
@@ -792,14 +793,12 @@ app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
     const connection = new solanaWeb3.Connection(process.env.SWAP_SOLANA_RPC_URL, 'confirmed');
     const balanceLamports = await connection.getBalance(userPubkey);
     const solBalance = balanceLamports / solanaWeb3.LAMPORTS_PER_SOL;
-    // 2. Fetch current SOL/USD price from CoinGecko
-    const axios = require('axios');
+    // 2. Fetch current SOL/USD price from Jupiter (via solPriceService)
     let solPrice = 0;
     try {
-      const priceResp = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
-      solPrice = priceResp.data.solana.usd;
+      solPrice = await solPriceService.getSolPrice();
     } catch (e) {
-      console.error('[BalanceCheck] Failed to fetch SOL price from CoinGecko:', e.message);
+      console.error('[BalanceCheck] Failed to fetch SOL price from Jupiter:', e.message);
       return res.status(503).json({
         error: 'Failed to fetch SOL price. Please try again later.',
         errorCode: 'SOL_PRICE_UNAVAILABLE'
