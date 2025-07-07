@@ -775,6 +775,7 @@ app.post('/api/rpc/token-accounts', async (req, res) => {
 // --- Endpoint for trade-local ---
 app.post('/api/trade-local', upload.single('imageFile'), async (req, res) => {
   try {
+    let timing = {};
     const { publicKey, amount } = req.body;
     // Validate publicKey
     let userPubkey;
